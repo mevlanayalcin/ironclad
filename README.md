@@ -96,3 +96,14 @@ make gno-test && make gno-lint   # Gno v1.8.0-rc.1 unit tests & lint
 make build && make go-test       # Go CLI, SSRF-hardened server, WASM engine & race tests
 make e2e                         # Full live gnodev v1.8.0-rc.1 E2E test + SARIF 2.1.0 check
 ```
+
+---
+
+## Live `onyx-1` Deployment & HD Demo Video
+
+- **HD Demo Video (1080p MP4):** [Watch / Download `ironclad-demo-1080p.mp4`](https://github.com/mevlanayalcin/ironclad/releases/download/v1.0.0/ironclad-demo-1080p.mp4)
+- **Live `onyx-1` Realm (`gnoweb`):** https://onyx.testnets.gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
+- **Live WebAssembly Browser Scanner:** https://mevlanayalcin.github.io/ironclad/
+- **GPAS Verification (`passed`):** https://gpas.onyx.testnets.gno.land/?path=gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
+- **Reproducible WASM SHA-256 (`make build-wasm`):** `f87d697838b4079f738ee91c75b456ae199ac301d8bf7af53d33bc14d09b85b4`
+- **Live On-Chain Proofs:** Deploy TX `3XyOwZ87YyyiK7yu96GMcx1EPkkQI8NFwrCaZjp0DDY=` (`1420062`), `RegisterAuditor` TX `TjuV6XIsBo3+Q0UHT8yv7zqYwPmoXCOJbg1GG+CYUDQ=` (`1421138`), plus 5 live `PublishAttestation` records (`r/.../ironclad` A+, `r/sys/namereg/v0` A, `r/gnoland/wugnot` A, `r/gnoland/blog` D, `r/sys/users` D).
