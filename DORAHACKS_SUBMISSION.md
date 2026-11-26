@@ -17,6 +17,8 @@
 - **Attestation `#3` (`r/gnoland/wugnot` — A 94/100):** Height `1421145` · TX `8qmBi4kpsb14ufFnHTvKadEDSURSH9GWCwzfELjTr+U=`
 - **Attestation `#4` (`r/gnoland/blog` — D 70/100):** Height `1421148` · TX `hgeu6JNeh6cIckc2LmcqwUth7Ni2C8bIHzQfCi0o/p4=`
 - **Attestation `#5` (`r/sys/users` — D 55/100):** Height `1421151` · TX `2+rVt6yDZiyCXrQhWWspihDbE441UlO5kjxwzHMJ/NM=`
+- **Attestation `#6` (`r/.../tollgate/v2` — A+ 100/100):** Height `1422326` · TX `Op88pR6njEhssKMgXjhZhGv+i6tiEB5zkKdHF8ylHno=`
+- **`ChallengeAttestation(#4, AVL001)` + `RespondToChallenge(#1, rebutted)`:** Heights `1421555` (`gVMieVkF+JoBGB6HbjZtGPxw0TufJHFOEUtbL75mJVA=`) & `1421557` (`/8BmRYEdyJ4iukIy/iWFdsdPS2mjBumSZVjTkTNQNP0=`)
 - **Deterministic WASM SHA-256 (`make build-wasm` on Go `1.24.6` with `-buildvcs=false -trimpath`):** `f87d697838b4079f738ee91c75b456ae199ac301d8bf7af53d33bc14d09b85b4`
 
 ## Problem & Innovation
