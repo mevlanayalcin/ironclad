@@ -11,18 +11,18 @@
     <header>
       <div>
         <h1>Ironclad Security Suite</h1>
-        <p class="sub">Static AST analyzer for Gno.land's official Threat-Class Taxonomy (<code>gno-security.md</code>, <code>gno-ai-contract-review.md</code>, <code>AVL001</code>, <code>GLOBAL001</code>, <code>RENDER001</code>) + on-chain attestation registry</p>
+        <p class="sub">Go AST static analyzer (compiled to WebAssembly for zero-backend exact CLI parity) enforcing Gno.land's official Threat-Class Taxonomy (<code>gno-security.md</code>, <code>gno-ai-contract-review.md</code>, <code>AVL001</code>, <code>GLOBAL001</code>, <code>RENDER001</code>)</p>
       </div>
       <div class="badges">
-        <span class="badge">15 AST Security Rules</span>
-        <span class="badge ok" id="healthBadge">Analyzer: connecting…</span>
+        <span class="badge">15 Go AST Rules + PARSE-ERR</span>
+        <span class="badge ok" id="healthBadge">Engine: loading Go WASM…</span>
       </div>
     </header>
 
     <section class="grid-2">
       <div class="card">
         <h2>Scan Live On-Chain Package (<code>onyx-1</code> / <code>gnodev</code>)</h2>
-        <p class="muted">Fetches live <code>.gno</code> files directly via ABCI <code>vm/qfile</code>, runs all 15 AST rules, computes deterministic SHA-256 digests, and checks on-chain attestations.</p>
+        <p class="muted">Fetches live <code>.gno</code> files directly via ABCI <code>vm/qfile</code>, executes the exact Go AST engine (via server API or local WebAssembly), computes canonical SHA-256 digests, and joins multi-auditor on-chain attestations.</p>
         <div class="row">
           <div class="field">
             <label for="rpcInput">Gno RPC URL</label>
@@ -41,7 +41,7 @@
 
         <hr style="border:none;border-top:1px solid var(--border);margin:18px 0" />
 
-        <h2>Paste Gno Source Code (Instant Sandbox Scan)</h2>
+        <h2>Paste Gno Source Code (Instant AST Sandbox)</h2>
         <div class="row">
           <button id="loadVulnBtn" class="secondary">Load Vulnerable Fixture</button>
           <button id="loadSafeBtn" class="secondary">Load Clean A+ Fixture</button>
@@ -66,6 +66,7 @@
       </div>
     </section>
   </div>
+  <script src="wasm_exec.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

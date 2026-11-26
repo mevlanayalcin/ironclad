@@ -79,6 +79,7 @@ print('CM=' + str(d['counts']['medium']))
 print('CL=' + str(d['counts']['low']))
 print('CI=' + str(d['counts']['info']))
 print('RULES=' + shlex.quote(','.join(d.get('rulesTriggered') or [])))
+print('SUMMARY=' + shlex.quote(f"Automated Ironclad AST audit: Grade {d['grade']} ({d['score']}/100) — C:{d['counts']['critical']} H:{d['counts']['high']} M:{d['counts']['medium']} L:{d['counts']['low']}."))
 ")"
   printf "%s\n" "$PW" | "$BIN/gnokey" maketx call deployer \
     -home "$KEYHOME" -insecure-password-stdin \
@@ -87,7 +88,7 @@ print('RULES=' + shlex.quote(','.join(d.get('rulesTriggered') or [])))
     -pkgpath "$R_PATH" -func PublishAttestation \
     -args "$pkg" -args "$SH" -args "$RH" -args "$VER" \
     -args "$CC" -args "$CH" -args "$CM" -args "$CL" -args "$CI" \
-    -args "$RULES" -args "$note" -args "https://github.com/mevlanayalcin/ironclad"
+    -args "$RULES" -args "$SUMMARY" -args "https://github.com/mevlanayalcin/ironclad"
   sleep 4
 }
 

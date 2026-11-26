@@ -112,5 +112,5 @@ print('VERIFIED LIVE REMOTE SCAN + ON-CHAIN ATTESTATION DIGEST MATCH:', att['dig
 "
 
 echo "[5/5] Verifying SARIF v2.1.0 output..."
-"$ROOT/bin/ironclad" scan --remote "$RPC_URL" --format sarif "$R_PATH" | python3 -c "import sys,json; s=json.load(sys.stdin); assert s['version']=='2.1.0' and len(s['runs'][0]['tool']['driver']['rules'])==15"
+"$ROOT/bin/ironclad" scan --remote "$RPC_URL" --format sarif "$R_PATH" | python3 -c "import sys,json; s=json.load(sys.stdin); assert s['version']=='2.1.0' and len(s['runs'][0]['tool']['driver']['rules'])>=15"
 echo "=== IRONCLAD E2E GNODEV 100% GREEN ==="

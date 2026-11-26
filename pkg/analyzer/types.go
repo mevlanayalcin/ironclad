@@ -36,6 +36,7 @@ type RuleMeta struct {
 	ThreatClass string   `json:"threatClass"`
 	Severity    Severity `json:"severity"`
 	Reference   string   `json:"reference"`
+	HelpURL     string   `json:"helpUrl"`
 	Remediation string   `json:"remediation"`
 }
 
@@ -81,6 +82,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Class-1a",
 		Severity:    SeverityCritical,
 		Reference:   "docs/resources/gno-security.md#class-1a",
+		HelpURL:     "https://github.com/gnolang/gno/blob/master/docs/resources/gno-security.md",
 		Remediation: "Remove realm parameters from interfaces; accept caller address derived at the call site under cur.IsCurrent().",
 	},
 	"GNO-TC1B": {
@@ -89,7 +91,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Class-1b",
 		Severity:    SeverityHigh,
 		Reference:   "docs/resources/gno-security.md#class-1b",
-		Remediation: "Never pass live cur realm handles into interface methods or caller-supplied callbacks; derive caller address first.",
+		Remediation: "Never pass live cur realm handles into caller-supplied callbacks or unverified interface methods; derive caller address first.",
 	},
 	"GNO-TC2": {
 		ID:          "GNO-TC2",
@@ -97,7 +99,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Class-2",
 		Severity:    SeverityCritical,
 		Reference:   "docs/resources/gno-security.md#class-2",
-		Remediation: "Derive caller identity from cur.Previous().Address() under cur.IsCurrent(); do not trust caller/sender/owner address or pkgPath parameters.",
+		Remediation: "Derive caller identity from cur.Previous().Address() under cur.IsCurrent(); do not trust caller/sender/owner/admin address or pkgPath parameters.",
 	},
 	"GNO-TC3": {
 		ID:          "GNO-TC3",
@@ -113,15 +115,15 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Class-4",
 		Severity:    SeverityHigh,
 		Reference:   "docs/resources/gno-security.md#class-4",
-		Remediation: "Avoid invoking caller-supplied func() callbacks under realm authority, or type callbacks with realm-owned private types.",
+		Remediation: "Avoid invoking untrusted caller-supplied func() callbacks under realm authority, or type callbacks with a realm-declared private parameter type.",
 	},
 	"GNO-SEC01": {
 		ID:          "GNO-SEC01",
-		Title:       "Missing cur.IsCurrent() guard in crossing function",
+		Title:       "Unguarded cur.Previous()/cur.Address() without cur.IsCurrent()",
 		ThreatClass: "Class-2",
 		Severity:    SeverityCritical,
 		Reference:   "docs/resources/gno-ai-contract-review.md#1",
-		Remediation: "Call if !cur.IsCurrent() { panic(...) } (or a package-local guard helper) before reading cur.Previous() or mutating state.",
+		Remediation: "Guard cur.Previous() / cur.Address() reads with if !cur.IsCurrent() { panic(...) } or runtime.AssertOriginCall().",
 	},
 	"GNO-SEC02": {
 		ID:          "GNO-SEC02",
@@ -129,7 +131,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Class-2",
 		Severity:    SeverityCritical,
 		Reference:   "docs/resources/gno-ai-contract-review.md#2",
-		Remediation: "Guard OriginSend() payment handlers with cur.Previous().IsUserCall() (not IsUser(), which permits ephemeral MsgRun realms).",
+		Remediation: "Guard OriginSend() payment handlers with cur.Previous().IsUserCall() or runtime.AssertOriginCall(), never IsUser().",
 	},
 	"GNO-SEC03": {
 		ID:          "GNO-SEC03",
@@ -137,7 +139,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Write-Authority-Leak",
 		Severity:    SeverityHigh,
 		Reference:   "docs/resources/gno-ai-contract-review.md#3",
-		Remediation: "Return value copies or scalar accessors instead of *avl.Tree, *bptree.Tree, or pointers to internal realm structs.",
+		Remediation: "Return value copies, scalar accessors, or *rotree.ReadOnlyTree instead of *avl.Tree or pointers to mutable realm structs.",
 	},
 	"GNO-SEC04": {
 		ID:          "GNO-SEC04",
@@ -161,7 +163,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Markdown-Injection",
 		Severity:    SeverityMedium,
 		Reference:   "docs/resources/gno-ai-contract-review.md#10",
-		Remediation: "Import gno.land/p/nt/markdown/sanitize/v0 and wrap user/path strings with sanitize.InlineText, sanitize.TableCell, or sanitize.Block.",
+		Remediation: "Wrap dynamic path/user strings in Render with gno.land/p/nt/markdown/sanitize/v0 (InlineText, TableCell, URL, Block).",
 	},
 	"GNO-SEC07": {
 		ID:          "GNO-SEC07",
@@ -177,6 +179,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Lint-DoS",
 		Severity:    SeverityMedium,
 		Reference:   "gnolang/gno#5068",
+		HelpURL:     "https://github.com/gnolang/gno/pull/5068",
 		Remediation: "Use IterateByOffset / ReverseIterateByOffset with a bounded page size instead of unbounded Iterate/ReverseIterate.",
 	},
 	"GLOBAL001": {
@@ -185,6 +188,7 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Lint-Encapsulation",
 		Severity:    SeverityMedium,
 		Reference:   "gnolang/gno#5068",
+		HelpURL:     "https://github.com/gnolang/gno/pull/5068",
 		Remediation: "Make package-level mutable variables unexported and expose safe value-copy getters.",
 	},
 	"RENDER001": {
@@ -193,8 +197,31 @@ var RuleCatalog = map[string]RuleMeta{
 		ThreatClass: "Lint-Purity",
 		Severity:    SeverityMedium,
 		Reference:   "gnolang/gno#5068",
+		HelpURL:     "https://github.com/gnolang/gno/pull/5068",
 		Remediation: "Keep Render(path string) strictly read-only; remove assignments or store mutations.",
 	},
+	"PARSE-ERR": {
+		ID:          "PARSE-ERR",
+		Title:       "Unparsable Gno source file",
+		ThreatClass: "Analysis-Integrity",
+		Severity:    SeverityHigh,
+		Reference:   "ironclad/parser",
+		HelpURL:     "https://github.com/mevlanayalcin/ironclad",
+		Remediation: "Fix syntax errors so the file can be fully parsed and audited.",
+	},
+}
+
+func SortedRuleMetas() []RuleMeta {
+	ids := make([]string, 0, len(RuleCatalog))
+	for k := range RuleCatalog {
+		ids = append(ids, k)
+	}
+	sort.Strings(ids)
+	out := make([]RuleMeta, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, RuleCatalog[id])
+	}
+	return out
 }
 
 func ComputeScore(c Counts) int {
@@ -229,7 +256,6 @@ func appendLP(b *strings.Builder, s string) {
 	b.WriteByte('|')
 }
 
-// AttestationDigest matches gno.land/p/<deployer>/ironclad.AttestationDigest byte-for-byte.
 func AttestationDigest(
 	chainID, targetPkgPath, sourceHash, reportDigest, analyzerVersion string,
 	c Counts,
@@ -255,7 +281,6 @@ func AttestationDigest(
 	return hex.EncodeToString(sum[:])
 }
 
-// HashSources computes a deterministic SHA-256 over sorted (filename, content) pairs.
 func HashSources(files map[string]string) string {
 	names := make([]string, 0, len(files))
 	for k := range files {
@@ -272,6 +297,9 @@ func HashSources(files map[string]string) string {
 }
 
 func HashFindings(findings []Finding) string {
+	if findings == nil {
+		findings = []Finding{}
+	}
 	raw, _ := json.Marshal(findings)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])

@@ -1,73 +1,82 @@
-# Ironclad — Gno Smart-Contract Static Security Analyzer & On-Chain Audit Attestation Registry
+# Ironclad — Gno Smart-Contract Static Security Analyzer & Multi-Auditor On-Chain Attestation Registry
 
 > Built for the **Gno.land Gnome Tavern Hackathon (Nov–Dec 2026)** on Gno `v1.8.0-rc.1` (`onyx-1`).
 
-**Ironclad** automates Gno.land's official November 2026 security specifications — **[`docs/resources/gno-security.md`](https://github.com/gnolang/gno/blob/master/docs/resources/gno-security.md)**, **[`docs/resources/gno-ai-contract-review.md`](https://github.com/gnolang/gno/blob/master/docs/resources/gno-ai-contract-review.md)**, and **[`gnolang/gno#5068`](https://github.com/gnolang/gno/pull/5068)** (`AVL001`, `GLOBAL001`, `RENDER001`) — pairing a fast Go AST static analyzer (with SARIF v2.1.0 & live `onyx-1` `vm/qfile` scanning) with an **immutable content-addressed on-chain audit attestation registry** on `onyx-1`.
+**Ironclad** automates Gno.land's official November 2026 security specifications — **[`docs/resources/gno-security.md`](https://github.com/gnolang/gno/blob/master/docs/resources/gno-security.md)**, **[`docs/resources/gno-ai-contract-review.md`](https://github.com/gnolang/gno/blob/master/docs/resources/gno-ai-contract-review.md)**, and **[`gnolang/gno#5068`](https://github.com/gnolang/gno/pull/5068)** (`AVL001`, `GLOBAL001`, `RENDER001`) — pairing a calibrated Go AST static analyzer (CLI + SARIF v2.1.0 + **Go WebAssembly browser engine** with 1:1 CLI parity + live `vm/qfile` RPC scanning) with a **multi-auditor, content-addressed on-chain attestation & challenge-resolution registry** on `onyx-1`.
+
+- **Live Browser Scanner (Go WASM + Direct `onyx-1` RPC):** https://mevlanayalcin.github.io/ironclad/
+- **Live `onyx-1` Pure Package:** `gno.land/p/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad` (GPAS `passed`)
+- **Live `onyx-1` Realm (`gnoweb`):** `https://onyx.testnets.gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad`
 
 ---
 
-## Implemented Rules (15 AST Security & Lint Detectors)
+## Live `onyx-1` Calibration Walkthrough
 
-| Rule ID | Severity | Official Gno Threat Class / Spec | What It Catches |
+Real scans executed directly against live `onyx-1` packages via ABCI `vm/qfile`:
+
+```text
+$ ironclad scan --remote https://rpc.onyx.testnets.gno.land:443 gno.land/r/sys/namereg/v0
+Ironclad ironclad-1.0.0 | Target: gno.land/r/sys/namereg/v0
+Grade: A (98/100) | Files: 9 | C:0 H:0 M:0 L:1 I:0
+  [LOW] GNO-SEC01 (Class-2) users.gno:40 — crossing function Register checks IsUserCall() without explicit cur.IsCurrent() check
+
+$ ironclad scan --remote https://rpc.onyx.testnets.gno.land:443 gno.land/r/gnoland/wugnot
+Ironclad ironclad-1.0.0 | Target: gno.land/r/gnoland/wugnot
+Grade: A (94/100) | Files: 1 | C:0 H:0 M:1 L:0 I:0
+  [MEDIUM] GLOBAL001 (Lint-Encapsulation) wugnot.gno:16 — exported mutable global var Token exposes realm state directly
+
+$ ironclad scan --pkg gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad ./gno/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
+Ironclad ironclad-1.0.0 | Target: gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
+Grade: A+ (100/100) | Files: 1 | C:0 H:0 M:0 L:0 I:0
+Status         : PASS (0 security findings)
+```
+
+---
+
+## Implemented Rules (15 Security & Lint Detectors + `PARSE-ERR`)
+
+| Rule ID | Severity | Official Spec / Threat Class | What It Detects |
 |---|---|---|---|
-| `GNO-TC1A` | `CRITICAL` | Class-1a (`gno-security.md`) | Interface methods taking `cur realm` (cur-disclosure / impersonate-self) |
-| `GNO-TC1B` | `HIGH` | Class-1b (`gno-security.md`) | Passing live `cur realm` handles into external/untrusted calls (impersonate-caller) |
-| `GNO-TC2` | `CRITICAL` | Class-2 (`gno-security.md`) | Designation-forgery: caller-supplied `caller`/`sender` `address` or `pkgPath` parameters |
-| `GNO-TC3` | `HIGH` | Class-3 (`gno-security.md`) | Unchecked open interface params (`grc20.Teller`, `banker.Banker`, etc.) & bypassable unexported interface sealing markers |
-| `GNO-TC4` | `HIGH` | Class-4 (`gno-security.md`) | Caller-supplied `func(...)` callbacks executed under realm authority |
-| `GNO-SEC01` | `CRITICAL` | Review Check #1 | Exported crossing function (`cur realm`) missing `cur.IsCurrent()` guard |
-| `GNO-SEC02` | `CRITICAL` | Review Check #2 | Payment handler using `IsUser()` instead of `IsUserCall()` or unguarded `unsafe.OriginSend()` |
-| `GNO-SEC03` | `HIGH` | Review Checks #3 & #8 | Exported function returning pointer (`*avl.Tree`, `*State`) leaking borrow-rule #2 write authority |
+| `GNO-TC1A` | `CRITICAL` | Class-1a (`gno-security.md`) | Interface methods accepting `cur realm` (cur-disclosure / impersonate-self) |
+| `GNO-TC1B` | `HIGH` | Class-1b (`gno-security.md`) | Passing live `cur realm` directly into caller-supplied callbacks `cb(cur)` or interface parameters |
+| `GNO-TC2` | `CRITICAL` | Class-2 (`gno-security.md`) | Designation-forgery: caller-supplied `caller`/`sender`/`owner`/`admin` `address` or `callerPkgPath` args |
+| `GNO-TC3` | `HIGH` | Class-3 (`gno-security.md`) | Unchecked open interfaces (`grc20.Teller`, `banker.Banker`, etc.) & bypassable unexported sealing markers (`isCanonical()`) |
+| `GNO-TC4` | `HIGH` | Class-4 (`gno-security.md`) | Untrusted `func(...)` callbacks invoked under realm authority (exempts realm-owned `func(*MyState)` per §4) |
+| `GNO-SEC01` | `CRITICAL`/`LOW` | Review Check #1 | Crossing function reading `cur.Previous()`/`cur.Address()` without `cur.IsCurrent()` or `AssertOriginCall()` |
+| `GNO-SEC02` | `CRITICAL` | Review Check #2 | Payment handler checking `IsUser()` instead of `IsUserCall()`, or unguarded `unsafe.OriginSend()` |
+| `GNO-SEC03` | `HIGH` | Review Checks #3 & #8 | Exported non-constructor returning mutable pointer (exempts `New*` and `*rotree.ReadOnlyTree`) |
 | `GNO-SEC04` | `CRITICAL` | Review Check #6 & `banker.gno` | Persisting `realm` or `banker.Banker` capabilities in package-level globals |
-| `GNO-SEC05` | `HIGH` | Review Check #9 | Using `unsafe.PreviousRealm()` / `CurrentRealm()` / `OriginCaller()` alongside `cur realm` |
-| `GNO-SEC06` | `MEDIUM` | Review Check #10 | `Render(path)` concatenating dynamic strings without `gno.land/p/nt/markdown/sanitize/v0` |
+| `GNO-SEC05` | `HIGH` | Review Check #9 | Using `unsafe.PreviousRealm()`/`CurrentRealm()`/`OriginCaller()` alongside `cur realm` |
+| `GNO-SEC06` | `MEDIUM` | Review Check #10 | `Render(path)` concatenating dynamic strings without calling `markdown/sanitize/v0` |
 | `GNO-SEC07` | `MEDIUM` | Review Check #11 | Unbounded `GetCoins(...).AmountOf(...)` or `GetCoins` in loops (unsolicited-denom gas DoS) |
 | `AVL001` | `MEDIUM` | `gnolang/gno#5068` | Unbounded `avl.Tree.Iterate("", "", ...)` / `ReverseIterate` without limit/offset |
-| `GLOBAL001` | `MEDIUM` | `gnolang/gno#5068` | Exported mutable global `var` in a `/r/` realm |
-| `RENDER001` | `MEDIUM` | `gnolang/gno#5068` | State mutation (`=`, `++`, `.Set()`, `.Remove()`) inside `Render(path)` |
+| `GLOBAL001` | `MEDIUM` | `gnolang/gno#5068` | Exported mutable global `var` in a `/r/` realm (exempts `Err* = errors.New(...)` sentinels) |
+| `RENDER001` | `MEDIUM` | `gnolang/gno#5068` | State mutation (`=`, `++`, `.Set()`, `.Remove()`, `.SendCoins()`) inside `Render(path)` |
+| `PARSE-ERR` | `HIGH` | Analysis Integrity | Unparsable `.gno` source file (prevents broken files from silently passing) |
+
+Inline suppressions: append `//ironclad:ignore <RULE-ID>` on the line to document an intentional reviewed exception.
 
 ---
 
-## Architecture
+## Multi-Auditor On-Chain Trust Model (`r/.../ironclad`)
 
-```mermaid
-flowchart LR
-    CLI["ironclad CLI / GitHub SARIF"] -->|vm/qfile live fetch| RPC["onyx-1 / gnodev RPC"]
-    Web["Ironclad Web Scanner UI"] -->|POST /api/scan/remote| Srv["ironclad-server (Go)"]
-    Srv -->|vm/qfile + vm/qrender| RPC
-    CLI -->|AST Analysis + SHA-256 Source & Report Hash| Report["Score 0..100 + Grade A+..F + SARIF 2.1.0"]
-    Report -->|PublishAttestation tx| Realm["gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad"]
-    Realm -->|Imports deterministic scorer & digest verifier| Pkg["gno.land/p/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad"]
-    Researcher["Security Researcher"] -->|ChallengeAttestation(missedRuleID, evidence)| Realm
-```
+- **No Certificate Hijacking:** Attestations are indexed per `(targetPkgPath, auditor)` with full chronological history. `:pkg/<path>` displays multi-auditor consensus and lists every auditor's certificate separately.
+- **No Digest Squatting:** Deduplication is scoped per `(digest, auditor)`; honest independent auditors can verify the same source snapshot without colliding.
+- **Anti-Griefing Challenge Resolution:** `ChallengeAttestation` validates `missedRuleID` against the official taxonomy and tracks open challenges without letting anonymous callers flip an auditor's status; the original auditor resolves each challenge via `RespondToChallenge(challengeID, accept, rationale)` (accepting auto-revokes with audit trail; rebutting records the public rationale).
+- **Hardened Rendering & JSON:** Overflow-capped finding counts (`0..100000`), strict `[A-Z0-9,-]` rule tokens, unique auditor handles, paginated listings, and Markdown-safe unicode escaping (`\u005b` etc.) in `:json/*`.
 
 ---
 
-## Quick Start & Reproducible Verification
+## Known Limitations
+- Ironclad performs syntactic & intra-package AST analysis without full cross-package type inference; complex aliased pointer leaks across multiple `/p/` indirections still require manual review.
+- On-chain attestations are auditor-signed, self-reported claims bound to `(pkgPath, sourceHash, reportDigest)`; consumers should verify auditor identity and recompute the digest via CLI or WASM.
+
+---
+
+## Quick Start
 
 ```bash
-# 1. Test & lint Ironclad's own /p/ and /r/ Gno packages (v1.8.0-rc.1)
-make gno-test
-make gno-lint
-
-# 2. Build CLI + Web Scanner & run Go unit tests (all 15 rules verified + cross-language digest check)
-make build
-make go-test
-
-# 3. Scan any local Gno realm or live deployed onyx-1 package
-./bin/ironclad scan --remote https://rpc.onyx.testnets.gno.land:443 gno.land/r/sys/namereg/v0
-./bin/ironclad scan --format sarif --fail-on-high ./gno/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
-
-# 4. Run full live gnodev v1.8.0-rc.1 E2E test
-#    (deploys /p/ -> /r/, live remote vm/qfile scan, PublishAttestation, web API digest verification, SARIF 2.1.0)
-make e2e
+make gno-test && make gno-lint   # Gno v1.8.0-rc.1 unit tests & lint
+make build && make go-test       # Go CLI, SSRF-hardened server, WASM engine & race tests
+make e2e                         # Full live gnodev v1.8.0-rc.1 E2E test + SARIF 2.1.0 check
 ```
-
----
-
-## Live `onyx-1` Deployment
-
-- **Pure Package:** `gno.land/p/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad`
-- **Stateful Realm:** `gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad`
-- **gnoweb Explorer:** `https://onyx.testnets.gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad`
-- **GPAS Verification:** `https://gpas.onyx.testnets.gno.land/?path=gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad`

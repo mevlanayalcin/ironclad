@@ -6,16 +6,21 @@ import (
 	"strings"
 )
 
-// ToSARIF serializes an Ironclad Report into SARIF v2.1.0 for GitHub Code Scanning.
+// ToSARIF serializes an Ironclad Report into deterministic SARIF v2.1.0.
 func ToSARIF(rep Report) ([]byte, error) {
-	rules := make([]map[string]any, 0, len(RuleCatalog))
-	for _, m := range RuleCatalog {
+	sorted := SortedRuleMetas()
+	rules := make([]map[string]any, 0, len(sorted))
+	for _, m := range sorted {
+		helpURI := m.HelpURL
+		if helpURI == "" {
+			helpURI = "https://github.com/mevlanayalcin/ironclad"
+		}
 		rules = append(rules, map[string]any{
 			"id":               m.ID,
 			"name":             m.ID,
 			"shortDescription": map[string]string{"text": m.Title},
 			"fullDescription":  map[string]string{"text": m.Remediation},
-			"helpUri":          "https://github.com/gnolang/gno/blob/master/" + m.Reference,
+			"helpUri":          helpURI,
 			"properties":       map[string]any{"threatClass": m.ThreatClass, "severity": m.Severity},
 		})
 	}
@@ -27,13 +32,17 @@ func ToSARIF(rep Report) ([]byte, error) {
 		} else if f.Severity == SeverityLow || f.Severity == SeverityInfo {
 			level = "note"
 		}
+		uri := f.File
+		if rep.Target != "" && !strings.Contains(f.File, "/") {
+			uri = strings.TrimRight(rep.Target, "/") + "/" + f.File
+		}
 		results = append(results, map[string]any{
 			"ruleId":  f.RuleID,
 			"level":   level,
 			"message": map[string]string{"text": f.Message + " Remediation: " + f.Remediation},
 			"locations": []map[string]any{{
 				"physicalLocation": map[string]any{
-					"artifactLocation": map[string]string{"uri": f.File},
+					"artifactLocation": map[string]string{"uri": uri},
 					"region":           map[string]int{"startLine": f.Line, "startColumn": f.Column},
 				},
 			}},
@@ -57,7 +66,6 @@ func ToSARIF(rep Report) ([]byte, error) {
 	return json.MarshalIndent(doc, "", "  ")
 }
 
-// ToMarkdown renders a concise audit summary report.
 func ToMarkdown(rep Report) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Ironclad Security Report: `%s`\n\n", rep.Target))

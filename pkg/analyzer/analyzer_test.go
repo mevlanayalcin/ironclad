@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -41,15 +42,14 @@ var (
 	counter      int
 )
 
-func AdminMint(cur realm, caller address, teller grc20.Teller, cb func()) *avl.Tree {
+func IssueTokens(cur realm, caller address, teller grc20.Teller, cb func(realm)) *avl.Tree {
 	_ = unsafe.PreviousRealm()
 	if !cur.Previous().IsUser() {
 		panic("not user")
 	}
 	_ = unsafe.OriginSend()
 	teller.Transfer(caller, 10)
-	cb()
-	external.Notify(cur)
+	cb(cur)
 	_ = banker.NewReadonlyBanker().GetCoins(caller).AmountOf("ugnot")
 	ExportedTree.Iterate("", "", func(k string, v any) bool {
 		return false
@@ -83,36 +83,39 @@ func Render(path string) string {
 	}
 
 	sarifBytes, err := ToSARIF(rep)
-	if err != nil || len(sarifBytes) < 100 {
-		t.Fatalf("SARIF export failed: %v", err)
+	if err != nil || !strings.Contains(string(sarifBytes), "https://github.com/gnolang/gno/pull/5068") {
+		t.Fatalf("SARIF export invalid: %v", err)
 	}
 }
 
-func TestCleanRealmScoresAPlus(t *testing.T) {
+func TestCalibratedPatternsNoFalsePositives(t *testing.T) {
+	// Tests A2 (_ realm, AssertOriginCall, forward-only), A4 (New*, *rotree.ReadOnlyTree), A5 (func(*MyState)), A6 (parse error)
 	cleanSrc := `package clean
 
 import (
 	"chain/banker"
+	"chain/runtime"
 	"chain/runtime/unsafe"
+	"gno.land/p/nt/avl/rotree/v0"
 	"gno.land/p/nt/avl/v0"
 	"gno.land/p/nt/markdown/sanitize/v0"
 )
 
+type MyState struct{ n int }
 var store = avl.NewTree()
+var st = &MyState{}
+
+func NewHelper() *MyState { return &MyState{} }
+func ReadTree() *rotree.ReadOnlyTree { return rotree.Wrap(store, nil) }
+func ApplyHook(fn func(*MyState)) { fn(st) }
+func ForwardOnly(_ realm) { _ = 1 }
 
 func Deposit(cur realm) {
-	if !cur.IsCurrent() {
-		panic("spoofed")
-	}
-	if !cur.Previous().IsUserCall() {
-		panic("user call only")
-	}
+	runtime.AssertOriginCall()
+	_ = cur.Previous().Address()
 	amt := unsafe.OriginSend().AmountOf("ugnot")
-	if amt <= 0 {
-		panic("zero")
-	}
 	_ = banker.NewReadonlyBanker().GetCoin(cur.Address(), "ugnot")
-	store.Set(cur.Previous().Address().String(), amt)
+	store.Set("x", amt)
 }
 
 func Render(path string) string {
@@ -121,6 +124,12 @@ func Render(path string) string {
 `
 	rep := AnalyzeSources("gno.land/r/test/clean", map[string]string{"clean.gno": cleanSrc})
 	if len(rep.Findings) != 0 || rep.Score != 100 || rep.Grade != "A+" {
-		t.Fatalf("expected clean realm A+ (100), got %s (%d): %+v", rep.Grade, rep.Score, rep.Findings)
+		t.Fatalf("expected A+ (100) with 0 findings, got %s (%d): %+v", rep.Grade, rep.Score, rep.Findings)
+	}
+
+	// A6: Unparsable file MUST NOT grade A+
+	badRep := AnalyzeSources("gno.land/r/test/broken", map[string]string{"broken.gno": "package broken\nfunc (((("})
+	if badRep.Grade == "A+" || badRep.Counts.High == 0 {
+		t.Fatalf("unparsable file should emit PARSE-ERR HIGH finding, got %+v", badRep)
 	}
 }

@@ -15,13 +15,10 @@ var (
 	reStandaloneCrossing = regexp.MustCompile(`(?m)^(\s*)crossing\(\)\s*$`)
 )
 
-// preprocessGno translates Gno-only syntax edge cases into valid Go syntax while
-// preserving 1-to-1 line numbers for exact diagnostic reporting.
 func preprocessGno(src string) string {
 	return reStandaloneCrossing.ReplaceAllString(src, "${1}_ = gno__crossing()")
 }
 
-// AnalyzeDirectory scans all non-test .gno files in a local directory.
 func AnalyzeDirectory(dir, targetName string) (Report, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -48,7 +45,6 @@ func AnalyzeDirectory(dir, targetName string) (Report, error) {
 	return AnalyzeSources(targetName, files), nil
 }
 
-// AnalyzeSources runs all 15 Ironclad AST rules over a set of Gno source files.
 func AnalyzeSources(target string, files map[string]string) Report {
 	isRealm := strings.Contains(target, "/r/") || detectRealmPackage(files)
 	fset := token.NewFileSet()
@@ -59,7 +55,7 @@ func AnalyzeSources(target string, files map[string]string) Report {
 		lines    []string
 		astFile  *ast.File
 		imports  map[string]string // alias -> path
-		hasSanit bool
+		sanAlias string            // alias of markdown/sanitize import, if any
 	}
 
 	names := make([]string, 0, len(files))
@@ -68,16 +64,33 @@ func AnalyzeSources(target string, files map[string]string) Report {
 	}
 	sort.Strings(names)
 
+	var findings []Finding
 	parsed := make([]*parsedFile, 0, len(names))
 	packageGuardHelpers := make(map[string]bool)
-	packageHasSanitize := false
 	packageGlobals := make(map[string]bool)
+	localTypes := make(map[string]bool)
+	localInterfaces := make(map[string]bool)
+	funcDecls := make(map[string]*ast.FuncDecl)
 
 	for _, name := range names {
 		raw := files[name]
 		norm := preprocessGno(raw)
 		af, err := parser.ParseFile(fset, name, norm, parser.ParseComments)
 		if err != nil {
+			// A6: Never silently skip unparsable files!
+			meta := RuleCatalog["PARSE-ERR"]
+			findings = append(findings, Finding{
+				RuleID:      "PARSE-ERR",
+				ThreatClass: meta.ThreatClass,
+				Severity:    meta.Severity,
+				Title:       meta.Title,
+				Message:     "failed to parse Gno source file: " + err.Error(),
+				File:        name,
+				Line:        1,
+				Column:      1,
+				Remediation: meta.Remediation,
+				Reference:   meta.Reference,
+			})
 			continue
 		}
 		pf := &parsedFile{
@@ -90,17 +103,18 @@ func AnalyzeSources(target string, files map[string]string) Report {
 		for _, imp := range af.Imports {
 			p := strings.Trim(imp.Path.Value, `"`)
 			alias := filepath.Base(p)
+			if len(alias) >= 2 && alias[0] == 'v' && alias[1] >= '0' && alias[1] <= '9' {
+				alias = filepath.Base(filepath.Dir(p))
+			}
 			if imp.Name != nil {
 				alias = imp.Name.Name
 			}
 			pf.imports[alias] = p
 			if strings.Contains(p, "markdown/sanitize") {
-				pf.hasSanit = true
-				packageHasSanitize = true
+				pf.sanAlias = alias
 			}
 		}
 
-		// Pre-pass: discover package-local cur.IsCurrent() helper functions and globals
 		for _, decl := range af.Decls {
 			switch d := decl.(type) {
 			case *ast.GenDecl:
@@ -112,12 +126,22 @@ func AnalyzeSources(target string, files map[string]string) Report {
 						}
 					}
 				}
+				if d.Tok == token.TYPE {
+					for _, spec := range d.Specs {
+						ts := spec.(*ast.TypeSpec)
+						localTypes[ts.Name.Name] = true
+						if _, ok := ts.Type.(*ast.InterfaceType); ok {
+							localInterfaces[ts.Name.Name] = true
+						}
+					}
+				}
 			case *ast.FuncDecl:
 				if d.Recv == nil && d.Body != nil {
-					if hasRealmParam(d.Type) && containsCall(d.Body, "IsCurrent") {
+					funcDecls[d.Name.Name] = d
+					if hasRealmParam(d.Type) && (containsCall(d.Body, "IsCurrent") || containsCall(d.Body, "AssertOriginCall")) {
 						packageGuardHelpers[d.Name.Name] = true
 					}
-					if hasRealmParam(d.Type) && containsCall(d.Body, "IsUserCall") {
+					if hasRealmParam(d.Type) && (containsCall(d.Body, "IsUserCall") || containsCall(d.Body, "AssertOriginCall")) {
 						packageGuardHelpers[d.Name.Name+":usercall"] = true
 					}
 				}
@@ -126,7 +150,7 @@ func AnalyzeSources(target string, files map[string]string) Report {
 		parsed = append(parsed, pf)
 	}
 
-	// Expand helper transitivity one level (e.g. mustDirectUserPayment -> mustCurrent)
+	// Expand helper transitivity one level
 	for _, pf := range parsed {
 		for _, decl := range pf.astFile.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -141,18 +165,27 @@ func AnalyzeSources(target string, files map[string]string) Report {
 		}
 	}
 
-	var findings []Finding
-	emit := func(pf *parsedFile, pos token.Pos, ruleID, detail string) {
+	emit := func(pf *parsedFile, pos token.Pos, ruleID, detail string, sevOverride ...Severity) {
 		meta := RuleCatalog[ruleID]
+		sev := meta.Severity
+		if len(sevOverride) > 0 && sevOverride[0] != "" {
+			sev = sevOverride[0]
+		}
 		position := fset.Position(pos)
 		snip := ""
 		if position.Line >= 1 && position.Line <= len(pf.lines) {
 			snip = strings.TrimSpace(pf.lines[position.Line-1])
 		}
+		// Support explicit //ironclad:ignore RULE-ID inline suppression
+		if position.Line >= 1 && position.Line <= len(pf.lines) {
+			if strings.Contains(pf.lines[position.Line-1], "ironclad:ignore "+ruleID) {
+				return
+			}
+		}
 		findings = append(findings, Finding{
 			RuleID:      ruleID,
 			ThreatClass: meta.ThreatClass,
-			Severity:    meta.Severity,
+			Severity:    sev,
 			Title:       meta.Title,
 			Message:     detail,
 			File:        pf.name,
@@ -198,10 +231,11 @@ func AnalyzeSources(target string, files map[string]string) Report {
 							emit(pf, m.Pos(), "GNO-TC1A",
 								"interface "+ts.Name.Name+" declares method "+mName+" accepting realm capability token")
 						}
+						// A7: Only flag actual sealing-marker names, not arbitrary helper predicates.
 						for _, n := range m.Names {
-							if isSealingMarkerName(n.Name) && ft.Params.NumFields() == 0 {
+							if isSealingMarkerName(n.Name) && ft.Params.NumFields() == 0 && ft.Results.NumFields() == 0 {
 								emit(pf, m.Pos(), "GNO-TC3",
-									"interface "+ts.Name.Name+" relies on unexported marker method "+n.Name+"() which is bypassable via embedding in Gno")
+									"interface "+ts.Name.Name+" relies on unexported sealing marker "+n.Name+"() which is bypassable via embedding in Gno")
 							}
 						}
 					}
@@ -226,7 +260,6 @@ func AnalyzeSources(target string, files map[string]string) Report {
 					if isRealm {
 						for idx, ident := range vs.Names {
 							if ast.IsExported(ident.Name) {
-								// Allow idiomatic sentinel errors (var ErrFoo = errors.New(...))
 								if strings.HasPrefix(ident.Name, "Err") && idx < len(vs.Values) && containsCall(vs.Values[idx], "New") {
 									continue
 								}
@@ -249,30 +282,61 @@ func AnalyzeSources(target string, files map[string]string) Report {
 			isExported := fn.Recv == nil && ast.IsExported(fnName)
 			realmParamName := getRealmParamName(fn.Type)
 
-			// GNO-SEC01: Crossing function missing cur.IsCurrent()
-			if isRealm && isExported && realmParamName != "" && fnName != "init" {
-				guarded := containsCall(fn.Body, "IsCurrent")
-				if !guarded {
-					for helper := range packageGuardHelpers {
-						if !strings.Contains(helper, ":") && containsIdentCall(fn.Body, helper) {
-							guarded = true
-							break
+			// Track param types for this function (used by GNO-TC1B & GNO-TC4)
+			paramIsCallback := make(map[string]bool)
+			paramIsInterface := make(map[string]bool)
+			if fn.Type.Params != nil {
+				for _, field := range fn.Type.Params.List {
+					tStr := exprString(field.Type)
+					_, isFunc := field.Type.(*ast.FuncType)
+					isIface := isSuspiciousInterfaceType(tStr) || localInterfaces[tStr]
+					for _, pName := range field.Names {
+						if isFunc {
+							paramIsCallback[pName.Name] = true
+						}
+						if isIface {
+							paramIsInterface[pName.Name] = true
 						}
 					}
 				}
-				if !guarded {
-					emit(pf, fn.Pos(), "GNO-SEC01",
-						"exported crossing function "+fnName+" accepts "+realmParamName+" realm without calling "+realmParamName+".IsCurrent()")
+			}
+
+			// A2: Calibrated GNO-SEC01:
+			// Skip `_ realm`, `init`, and `Render`.
+			// Fire CRITICAL only when the function actually reads cur.Previous() or cur.Address()
+			// without cur.IsCurrent(), runtime.AssertOriginCall(), or a package guard helper.
+			if isRealm && isExported && realmParamName != "" && realmParamName != "_" && fnName != "init" && fnName != "Render" {
+				readsIdentity := callsMethodOn(fn.Body, realmParamName, "Previous") || callsMethodOn(fn.Body, realmParamName, "Address")
+				if readsIdentity {
+					guarded := containsCall(fn.Body, "IsCurrent") || containsCall(fn.Body, "AssertOriginCall")
+					if !guarded {
+						for helper := range packageGuardHelpers {
+							if !strings.Contains(helper, ":") && containsIdentCall(fn.Body, helper) {
+								guarded = true
+								break
+							}
+						}
+					}
+					if !guarded {
+						// Direct EOA IsUserCall() provides strong frame verification; downgrade to LOW advisory if present.
+						if containsCall(fn.Body, "IsUserCall") {
+							emit(pf, fn.Pos(), "GNO-SEC01",
+								"crossing function "+fnName+" checks IsUserCall() without explicit "+realmParamName+".IsCurrent() check", SeverityLow)
+						} else {
+							emit(pf, fn.Pos(), "GNO-SEC01",
+								"exported crossing function "+fnName+" reads "+realmParamName+".Previous()/Address() without "+realmParamName+".IsCurrent() or AssertOriginCall()")
+						}
+					}
 				}
 			}
 
-			// GNO-TC2: Designation-forgery parameters on exported mutating/auth functions
+			// A7: GNO-TC2 designation-forgery check (fixed getter exemptions so IssueTokens is NOT skipped)
 			if isRealm && isExported && fnName != "Render" && fnName != "init" && fn.Type.Params != nil && !isReadOnlyGetterName(fnName) {
 				for _, field := range fn.Type.Params.List {
 					tStr := exprString(field.Type)
 					for _, pName := range field.Names {
 						low := strings.ToLower(pName.Name)
-						if tStr == "address" && (low == "caller" || low == "sender" || low == "origin" || low == "admin") {
+						if tStr == "address" && (low == "caller" || low == "sender" || low == "origin" || low == "admin" || low == "owner") {
 							emit(pf, pName.Pos(), "GNO-TC2",
 								"exported function "+fnName+" accepts caller-controlled address parameter "+pName.Name+" instead of cur.Previous().Address()")
 						}
@@ -284,7 +348,7 @@ func AnalyzeSources(target string, files map[string]string) Report {
 				}
 			}
 
-			// GNO-TC3: Unchecked open interface parameters (grc20.Teller, banker.Banker, etc.)
+			// GNO-TC3: Unchecked open interface parameters
 			if isRealm && isExported && fn.Type.Params != nil {
 				for _, field := range fn.Type.Params.List {
 					tStr := exprString(field.Type)
@@ -298,37 +362,54 @@ func AnalyzeSources(target string, files map[string]string) Report {
 				}
 			}
 
-			// GNO-TC4: Caller-supplied func() callback invoked in exported realm function
+			// A5: GNO-TC4 caller-supplied callbacks — allow realm-owned local typed callbacks func(*MyState)
 			if isRealm && isExported && fn.Type.Params != nil {
 				for _, field := range fn.Type.Params.List {
-					if _, isFunc := field.Type.(*ast.FuncType); isFunc {
-						for _, pName := range field.Names {
-							if containsIdentCall(fn.Body, pName.Name) {
-								emit(pf, field.Pos(), "GNO-TC4",
-									"exported function "+fnName+" invokes caller-supplied callback "+pName.Name+" under realm authority")
-							}
+					ft, isFunc := field.Type.(*ast.FuncType)
+					if !isFunc {
+						continue
+					}
+					if callbackUsesRealmOwnedType(ft, localTypes) {
+						continue
+					}
+					for _, pName := range field.Names {
+						if containsIdentCall(fn.Body, pName.Name) {
+							emit(pf, field.Pos(), "GNO-TC4",
+								"exported function "+fnName+" invokes caller-supplied callback "+pName.Name+" under realm authority")
 						}
 					}
 				}
 			}
 
-			// GNO-SEC03: Exported realm function returning pointer to mutable state / *avl.Tree
-			if isRealm && isExported && fn.Type.Results != nil {
+			// A4: GNO-SEC03 pointer return check — skip New* constructors and safe ReadOnlyTree wrappers
+			if isRealm && isExported && fn.Type.Results != nil && !strings.HasPrefix(fnName, "New") {
 				for _, res := range fn.Type.Results.List {
 					if star, ok := res.Type.(*ast.StarExpr); ok {
 						tStr := exprString(star)
+						if strings.Contains(tStr, "ReadOnlyTree") || strings.Contains(tStr, "ReadOnly") {
+							continue
+						}
 						emit(pf, res.Pos(), "GNO-SEC03",
 							"exported function "+fnName+" returns pointer "+tStr+" which may leak realm write authority via borrow rule #2")
 					}
 				}
 			}
 
-			// GNO-SEC02: IsUser() used instead of IsUserCall(), or unguarded OriginSend()
+			// Inspect statements & call expressions in body
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
+
+				// A3: Direct callback invocation passing live cur realm: cb(cur)
+				if realmParamName != "" && realmParamName != "_" {
+					if id, ok := call.Fun.(*ast.Ident); ok && paramIsCallback[id.Name] && argsContainIdent(call.Args, realmParamName) {
+						emit(pf, call.Pos(), "GNO-TC1B",
+							"live realm handle "+realmParamName+" passed directly into caller-supplied callback "+id.Name+"()")
+					}
+				}
+
 				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
@@ -352,8 +433,7 @@ func AnalyzeSources(target string, files map[string]string) Report {
 							"OriginSend() called in "+fnName+" without cur.Previous().IsUserCall() or runtime.AssertOriginCall() guard")
 					}
 				}
-				// GNO-SEC05: unsafe.PreviousRealm / CurrentRealm / OriginCaller alongside cur realm
-				if hasUnsafeImport && realmParamName != "" {
+				if hasUnsafeImport && realmParamName != "" && realmParamName != "_" {
 					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "unsafe" {
 						if sel.Sel.Name == "PreviousRealm" || sel.Sel.Name == "CurrentRealm" || sel.Sel.Name == "OriginCaller" {
 							emit(pf, call.Pos(), "GNO-SEC05",
@@ -361,10 +441,12 @@ func AnalyzeSources(target string, files map[string]string) Report {
 						}
 					}
 				}
-				// GNO-TC1B: passing raw cur realm into a non-banker/non-cross/non-helper external selector call
-				if realmParamName != "" && isExternalCurLeak(call, sel, realmParamName) {
-					emit(pf, call.Pos(), "GNO-TC1B",
-						"live realm handle "+realmParamName+" passed directly into "+exprString(sel)+"() (prefer passing cur.Previous().Address() or cross(cur))")
+				// A3: Selector call passing raw cur into an interface-typed parameter (never flagging canonical stdlib/dao/grc20 calls)
+				if realmParamName != "" && realmParamName != "_" && argsContainIdent(call.Args, realmParamName) {
+					if id, ok := sel.X.(*ast.Ident); ok && paramIsInterface[id.Name] {
+						emit(pf, call.Pos(), "GNO-TC1B",
+							"live realm handle "+realmParamName+" passed directly into interface method "+id.Name+"."+sel.Sel.Name+"()")
+					}
 				}
 				// GNO-SEC07: GetCoins(...).AmountOf(...)
 				if sel.Sel.Name == "AmountOf" {
@@ -385,7 +467,7 @@ func AnalyzeSources(target string, files map[string]string) Report {
 				return true
 			})
 
-			// GNO-SEC07 loop check: GetCoins inside for/range loop
+			// GNO-SEC07 loop check
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch n.(type) {
 				case *ast.ForStmt, *ast.RangeStmt:
@@ -403,15 +485,12 @@ func AnalyzeSources(target string, files map[string]string) Report {
 				return true
 			})
 
-			// Render checks: GNO-SEC06 & RENDER001
+			// Render checks: A7 (verify actual sanitize usage in Render or its callees) + RENDER001
 			if isRealm && fn.Recv == nil && fnName == "Render" {
-				if !pf.hasSanit && !packageHasSanitize {
-					if renderConcatenatesInput(fn) {
-						emit(pf, fn.Pos(), "GNO-SEC06",
-							"Render(path) concatenates dynamic strings into Markdown without importing gno.land/p/nt/markdown/sanitize/v0")
-					}
+				if renderConcatenatesDynamicInput(fn) && !renderUsesSanitize(fn, pf.sanAlias, funcDecls) {
+					emit(pf, fn.Pos(), "GNO-SEC06",
+						"Render(path) concatenates dynamic strings into Markdown without calling markdown/sanitize helpers")
 				}
-				// RENDER001: mutation of package globals or avl.Tree Set/Remove inside Render
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					switch stmt := n.(type) {
 					case *ast.AssignStmt:
@@ -523,11 +602,12 @@ func isSealingMarkerName(name string) bool {
 		return false
 	}
 	low := strings.ToLower(name)
-	return strings.Contains(low, "seal") || strings.Contains(low, "canonical") || strings.HasPrefix(low, "is")
+	return low == "iscanonical" || low == "sealed" || low == "issealed" || low == "seal" ||
+		strings.HasPrefix(low, "iscanonical") || strings.HasPrefix(low, "sealed")
 }
 
 func isReadOnlyGetterName(name string) bool {
-	for _, p := range []string{"Get", "Has", "Check", "Verify", "Is", "Total", "Balance", "Allowance", "List", "Count", "Query"} {
+	for _, p := range []string{"Get", "Has", "Check", "Verify", "Total", "Balance", "Allowance", "List", "Count", "Query", "IsValid", "IsActive", "IsPaused", "IsOwner", "IsCanonical"} {
 		if strings.HasPrefix(name, p) {
 			return true
 		}
@@ -544,15 +624,38 @@ func isSuspiciousInterfaceType(t string) bool {
 	return false
 }
 
-func isExternalCurLeak(call *ast.CallExpr, sel *ast.SelectorExpr, curName string) bool {
-	// Allowed: banker.NewBanker(..., cur), cross(cur), or cur.<method>()
-	if id, ok := sel.X.(*ast.Ident); ok {
-		if id.Name == curName || id.Name == "banker" || id.Name == "grc20" {
-			return false
+func callbackUsesRealmOwnedType(ft *ast.FuncType, localTypes map[string]bool) bool {
+	if ft == nil || ft.Params == nil || len(ft.Params.List) == 0 {
+		return false
+	}
+	for _, f := range ft.Params.List {
+		tStr := strings.TrimLeft(exprString(f.Type), "*[]")
+		if localTypes[tStr] {
+			return true
 		}
 	}
-	for _, arg := range call.Args {
-		if id, ok := arg.(*ast.Ident); ok && id.Name == curName {
+	return false
+}
+
+func callsMethodOn(root ast.Node, objName, method string) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == method {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == objName {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func argsContainIdent(args []ast.Expr, name string) bool {
+	for _, a := range args {
+		if id, ok := a.(*ast.Ident); ok && id.Name == name {
 			return true
 		}
 	}
@@ -583,15 +686,14 @@ func callbackHasEarlyStop(e ast.Expr) bool {
 	return hasTrue
 }
 
-func renderConcatenatesInput(fn *ast.FuncDecl) bool {
+func renderConcatenatesDynamicInput(fn *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if bin, ok := n.(*ast.BinaryExpr); ok && bin.Op == token.ADD {
-			found = true
-			return false
-		}
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Sprintf" || sel.Sel.Name == "WriteString") {
+			// Flag only if at least one operand is not a literal string
+			_, lLit := bin.X.(*ast.BasicLit)
+			_, rLit := bin.Y.(*ast.BasicLit)
+			if !lLit || !rLit {
 				found = true
 				return false
 			}
@@ -599,6 +701,49 @@ func renderConcatenatesInput(fn *ast.FuncDecl) bool {
 		return true
 	})
 	return found
+}
+
+func renderUsesSanitize(fn *ast.FuncDecl, sanAlias string, decls map[string]*ast.FuncDecl) bool {
+	if sanAlias == "" {
+		return false
+	}
+	visited := make(map[string]bool)
+	var check func(body *ast.BlockStmt, depth int) bool
+	check = func(body *ast.BlockStmt, depth int) bool {
+		if body == nil || depth > 2 {
+			return false
+		}
+		used := false
+		ast.Inspect(body, func(n ast.Node) bool {
+			if used {
+				return false
+			}
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch f := c.Fun.(type) {
+			case *ast.SelectorExpr:
+				if id, ok := f.X.(*ast.Ident); ok && id.Name == sanAlias {
+					used = true
+					return false
+				}
+			case *ast.Ident:
+				if !visited[f.Name] {
+					if targetFn, exists := decls[f.Name]; exists {
+						visited[f.Name] = true
+						if check(targetFn.Body, depth+1) {
+							used = true
+							return false
+						}
+					}
+				}
+			}
+			return true
+		})
+		return used
+	}
+	return check(fn.Body, 0)
 }
 
 func containsCall(root ast.Node, methodName string) bool {

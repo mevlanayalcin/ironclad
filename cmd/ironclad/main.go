@@ -21,7 +21,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "rules":
-		for _, m := range analyzer.RuleCatalog {
+		for _, m := range analyzer.SortedRuleMetas() {
 			fmt.Printf("%-10s %-8s %-20s %s\n", m.ID, m.Severity, m.ThreatClass, m.Title)
 		}
 	case "scan":

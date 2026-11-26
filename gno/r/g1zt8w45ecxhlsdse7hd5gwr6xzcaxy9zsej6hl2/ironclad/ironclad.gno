@@ -1,6 +1,10 @@
-// Package ironclad implements an immutable, content-addressed on-chain audit
-// attestation and security badge registry for Gno.land packages and realms.
-// Every function strictly complies with gno-security.md and gno-ai-contract-review.md.
+// Package ironclad implements an immutable, multi-auditor, content-addressed
+// audit attestation, challenge-resolution, and security badge registry for
+// Gno.land packages and realms.
+//
+// Security model: attestations are cryptographically bound to the publishing
+// auditor's address (self-reported / auditor-signed claims). No caller can
+// overwrite another auditor's certificate or squat another auditor's digest.
 package ironclad
 
 import (
@@ -17,16 +21,20 @@ import (
 )
 
 const (
-	StatusValid      = "valid"
-	StatusChallenged = "challenged"
-	StatusRevoked    = "revoked"
+	StatusValid   = "valid"
+	StatusRevoked = "revoked"
 
-	maxRenderRows = 25
-	maxHandleLen  = 40
-	maxBioLen     = 240
-	maxSummaryLen = 400
-	maxRulesLen   = 240
-	maxURLLen     = 200
+	ChallengeOpen     = "open"
+	ChallengeAccepted = "accepted"
+	ChallengeRebutted = "rebutted"
+
+	maxRenderRows  = 25
+	maxFindingCnt  = 100000 // prevents int64 score-penalty wraparound (R5)
+	maxHandleLen   = 40
+	maxBioLen      = 240
+	maxSummaryLen  = 400
+	maxRulesLen    = 240
+	maxURLLen      = 200
 )
 
 type auditorRecord struct {
@@ -61,19 +69,23 @@ type attestationRecord struct {
 	status          string
 	revokeReason    string
 	challengeCount  int
+	openChallenges  int
 }
 
 type challengeRecord struct {
-	id             uint64
-	attestationID  uint64
-	challenger     address
-	missedRuleID   string
-	evidenceDigest string
-	reason         string
-	height         int64
+	id              uint64
+	attestationID   uint64
+	challenger      address
+	missedRuleID    string
+	evidenceDigest  string
+	reason          string
+	height          int64
+	status          string
+	auditorResponse string
+	resolvedHeight  int64
 }
 
-// Public read-only value views (zero mutable pointers ever returned).
+// Public read-only value views (zero mutable pointers ever exposed).
 
 type AuditorView struct {
 	Addr              address
@@ -107,17 +119,36 @@ type AttestationView struct {
 	Status          string
 	RevokeReason    string
 	ChallengeCount  int
+	OpenChallenges  int
+}
+
+type ChallengeView struct {
+	ID              uint64
+	AttestationID   uint64
+	Challenger      address
+	MissedRuleID    string
+	EvidenceDigest  string
+	Reason          string
+	Height          int64
+	Status          string
+	AuditorResponse string
+	ResolvedHeight  int64
 }
 
 // Strictly unexported realm state (zero GLOBAL001 violations).
 var (
-	auditors       = avl.NewTree()
-	attestations   = avl.NewTree()
-	latestByPkg    = avl.NewTree()
-	digestIndex    = avl.NewTree()
-	challenges     = avl.NewTree()
-	nextAttestID   seqid.ID
-	nextChallengID seqid.ID
+	auditors            = avl.NewTree() // addr -> *auditorRecord
+	handleIndex         = avl.NewTree() // lower(handle) -> address (uniqueness)
+	attestations        = avl.NewTree() // seqid.Binary() -> *attestationRecord
+	pkgIndex            = avl.NewTree() // pkgPath -> bool (distinct package count)
+	latestByPkgAuditor  = avl.NewTree() // pkgPath+"|"+auditor -> uint64 (R2: no hijack)
+	pkgAttestations     = avl.NewTree() // pkgPath+"|"+seqid.Binary() -> uint64 (history)
+	auditorDigestIndex  = avl.NewTree() // digest+"|"+auditor -> uint64 (R3: no squatting)
+	digestFirstIndex    = avl.NewTree() // digest -> uint64 (lookup helper, non-blocking)
+	challenges          = avl.NewTree() // seqid.Binary() -> *challengeRecord
+	attChallenges       = avl.NewTree() // seqid(attID).Binary()+"|"+seqid(chID).Binary() -> uint64
+	nextAttestID        seqid.ID
+	nextChallengeID     seqid.ID
 )
 
 func mustCurrent(cur realm) {
@@ -137,6 +168,17 @@ func getAttestationRecord(id uint64) *attestationRecord {
 	return v.(*attestationRecord)
 }
 
+func getChallengeRecord(id uint64) *challengeRecord {
+	if id == 0 {
+		return nil
+	}
+	v := challenges.Get(seqid.ID(id).Binary())
+	if v == nil {
+		return nil
+	}
+	return v.(*challengeRecord)
+}
+
 func getAuditorRecord(addr address) *auditorRecord {
 	v := auditors.Get(addr.String())
 	if v == nil {
@@ -145,7 +187,57 @@ func getAuditorRecord(addr address) *auditorRecord {
 	return v.(*auditorRecord)
 }
 
-// RegisterAuditor creates or updates the caller's on-chain auditor profile.
+func isValidRuleToken(s string) bool {
+	switch s {
+	case "GNO-TC1A", "GNO-TC1B", "GNO-TC2", "GNO-TC3", "GNO-TC4",
+		"GNO-SEC01", "GNO-SEC02", "GNO-SEC03", "GNO-SEC04", "GNO-SEC05", "GNO-SEC06", "GNO-SEC07",
+		"AVL001", "GLOBAL001", "RENDER001", "PARSE-ERR":
+		return true
+	default:
+		return false
+	}
+}
+
+// isValidRulesList validates comma-separated rule IDs using strict [A-Z0-9,-] (R8).
+func isValidRulesList(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) > maxRulesLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == ','
+		if !ok {
+			return false
+		}
+	}
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		if !isValidRuleToken(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidVersionToken(s string) bool {
+	if len(s) == 0 || len(s) > 48 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '-' || c == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// RegisterAuditor creates or updates the caller's unique on-chain auditor profile.
 func RegisterAuditor(cur realm, handle, bio, websiteURL string) {
 	mustCurrent(cur)
 	caller := cur.Previous().Address()
@@ -154,6 +246,11 @@ func RegisterAuditor(cur realm, handle, bio, websiteURL string) {
 	if handle == "" || len(handle) > maxHandleLen {
 		panic("ironclad: invalid handle")
 	}
+	lowerHandle := strings.ToLower(handle)
+	if owner := handleIndex.Get(lowerHandle); owner != nil && owner.(address) != caller {
+		panic("ironclad: auditor handle already taken")
+	}
+
 	bio = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(bio))
 	if len(bio) > maxBioLen {
 		panic("ironclad: bio exceeds max length")
@@ -176,15 +273,20 @@ func RegisterAuditor(cur realm, handle, bio, websiteURL string) {
 			registeredHeight: runtime.ChainHeight(),
 		})
 	} else {
+		oldLower := strings.ToLower(existing.handle)
+		if oldLower != lowerHandle {
+			handleIndex.Remove(oldLower)
+		}
 		existing.handle = handle
 		existing.bio = bio
 		existing.websiteURL = cleanURL
 	}
+	handleIndex.Set(lowerHandle, caller)
 	chain.Emit("AuditorRegistered", "auditor", caller.String(), "handle", handle)
 }
 
-// PublishAttestation anchors an immutable, content-addressed static security
-// analysis verdict for a Gno package/realm snapshot on chain.
+// PublishAttestation anchors an immutable, auditor-scoped content-addressed
+// static security analysis verdict for a Gno package/realm snapshot on chain.
 func PublishAttestation(
 	cur realm,
 	targetPkgPath string,
@@ -213,16 +315,17 @@ func PublishAttestation(
 	if !pironclad.IsValidHexDigest(reportDigest) {
 		panic("ironclad: invalid reportDigest (expect 64-char lowercase sha256 hex)")
 	}
-	analyzerVersion = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(analyzerVersion))
-	if analyzerVersion == "" || len(analyzerVersion) > 48 {
-		panic("ironclad: invalid analyzerVersion")
+	analyzerVersion = strings.TrimSpace(analyzerVersion)
+	if !isValidVersionToken(analyzerVersion) {
+		panic("ironclad: invalid analyzerVersion (use [a-zA-Z0-9._-], 1..48 chars)")
 	}
-	if critical < 0 || high < 0 || medium < 0 || low < 0 || info < 0 {
-		panic("ironclad: finding counts cannot be negative")
+	if critical < 0 || high < 0 || medium < 0 || low < 0 || info < 0 ||
+		critical > maxFindingCnt || high > maxFindingCnt || medium > maxFindingCnt || low > maxFindingCnt || info > maxFindingCnt {
+		panic("ironclad: finding counts out of bounds (0..100000)")
 	}
-	rulesTriggered = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(rulesTriggered))
-	if len(rulesTriggered) > maxRulesLen {
-		panic("ironclad: rulesTriggered exceeds max length")
+	rulesTriggered = strings.TrimSpace(rulesTriggered)
+	if !isValidRulesList(rulesTriggered) {
+		panic("ironclad: invalid rulesTriggered (must be comma-separated known rule IDs)")
 	}
 	summary = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(summary))
 	if len(summary) > maxSummaryLen {
@@ -246,8 +349,13 @@ func PublishAttestation(
 		analyzerVersion,
 		critical, high, medium, low, info,
 	)
-	if digestIndex.Has(digest) {
-		panic("ironclad: identical attestation already published")
+
+	// R3: Dedup strictly per (digest, auditor) so no one can squat another auditor's digest.
+	dedupKey := digest + "|" + caller.String()
+	if prev := auditorDigestIndex.Get(dedupKey); prev != nil {
+		if prevRec := getAttestationRecord(prev.(uint64)); prevRec != nil && prevRec.status != StatusRevoked {
+			panic("ironclad: you already published an active identical attestation")
+		}
 	}
 
 	aid := nextAttestID.Next()
@@ -273,18 +381,26 @@ func PublishAttestation(
 		status:          StatusValid,
 	}
 	attestations.Set(aid.Binary(), rec)
-	latestByPkg.Set(targetPkgPath, rec.id)
-	digestIndex.Set(digest, rec.id)
+	pkgIndex.Set(targetPkgPath, true)
+	// R2: Scoped per (pkgPath, auditor) + full chronological history; no last-writer-wins hijack.
+	latestByPkgAuditor.Set(targetPkgPath+"|"+caller.String(), rec.id)
+	pkgAttestations.Set(targetPkgPath+"|"+aid.Binary(), rec.id)
+	auditorDigestIndex.Set(dedupKey, rec.id)
+	if !digestFirstIndex.Has(digest) {
+		digestFirstIndex.Set(digest, rec.id)
+	}
 
 	if aud := getAuditorRecord(caller); aud != nil {
 		aud.attestationsCount++
 	} else {
+		autoHandle := "auditor-" + caller.String()[:10]
 		auditors.Set(caller.String(), &auditorRecord{
 			addr:              caller,
-			handle:            "auditor-" + caller.String()[:10],
+			handle:            autoHandle,
 			registeredHeight:  runtime.ChainHeight(),
 			attestationsCount: 1,
 		})
+		handleIndex.Set(strings.ToLower(autoHandle), caller)
 	}
 
 	chain.Emit(
@@ -299,8 +415,9 @@ func PublishAttestation(
 	return rec.id
 }
 
-// ChallengeAttestation records an on-chain counter-finding against a published
-// attestation, flagging a missed rule ID and evidence SHA-256 hash.
+// ChallengeAttestation records an on-chain counter-finding against an attestation.
+// R4: Does NOT unilaterally flip the attestation status (prevents anonymous griefing);
+// instead records a structured open challenge that the auditor can accept or rebut.
 func ChallengeAttestation(
 	cur realm,
 	attestationID uint64,
@@ -316,9 +433,9 @@ func ChallengeAttestation(
 	if rec.status == StatusRevoked {
 		panic("ironclad: attestation already revoked")
 	}
-	missedRuleID = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(missedRuleID))
-	if missedRuleID == "" || len(missedRuleID) > 32 {
-		panic("ironclad: invalid missedRuleID")
+	missedRuleID = strings.TrimSpace(missedRuleID)
+	if !isValidRuleToken(missedRuleID) {
+		panic("ironclad: unknown missedRuleID (must match official Ironclad taxonomy rule)")
 	}
 	if !pironclad.IsValidHexDigest(evidenceDigest) {
 		panic("ironclad: invalid evidenceDigest")
@@ -328,7 +445,7 @@ func ChallengeAttestation(
 		panic("ironclad: valid challenge reason required")
 	}
 
-	cid := nextChallengID.Next()
+	cid := nextChallengeID.Next()
 	ch := &challengeRecord{
 		id:             uint64(cid),
 		attestationID:  attestationID,
@@ -337,10 +454,12 @@ func ChallengeAttestation(
 		evidenceDigest: evidenceDigest,
 		reason:         reason,
 		height:         runtime.ChainHeight(),
+		status:         ChallengeOpen,
 	}
 	challenges.Set(cid.Binary(), ch)
+	attChallenges.Set(seqid.ID(attestationID).Binary()+"|"+cid.Binary(), ch.id)
 	rec.challengeCount++
-	rec.status = StatusChallenged
+	rec.openChallenges++
 
 	chain.Emit(
 		"AttestationChallenged",
@@ -350,6 +469,55 @@ func ChallengeAttestation(
 		"challenger", ch.challenger.String(),
 	)
 	return ch.id
+}
+
+// RespondToChallenge lets the original auditor resolve an open challenge by
+// either accepting the finding (auto-revoking the attestation) or rebutting it
+// with a public technical rationale.
+func RespondToChallenge(cur realm, challengeID uint64, accept bool, response string) {
+	mustCurrent(cur)
+	ch := getChallengeRecord(challengeID)
+	if ch == nil {
+		panic("ironclad: challenge not found")
+	}
+	if ch.status != ChallengeOpen {
+		panic("ironclad: challenge already resolved")
+	}
+	rec := getAttestationRecord(ch.attestationID)
+	caller := cur.Previous().Address()
+	if caller != rec.auditor {
+		panic("ironclad: only original auditor may respond to challenge")
+	}
+	response = strings.TrimSpace(sanitize.StripBidiAndZeroWidth(response))
+	if response == "" || len(response) > maxSummaryLen {
+		panic("ironclad: response rationale required")
+	}
+
+	ch.auditorResponse = response
+	ch.resolvedHeight = runtime.ChainHeight()
+	if rec.openChallenges > 0 {
+		rec.openChallenges--
+	}
+
+	if accept {
+		ch.status = ChallengeAccepted
+		if rec.status != StatusRevoked {
+			rec.status = StatusRevoked
+			rec.revokeReason = "Accepted challenge #" + strconv.FormatUint(challengeID, 10) + " (" + ch.missedRuleID + "): " + response
+			if aud := getAuditorRecord(caller); aud != nil {
+				aud.revocationsCount++
+			}
+		}
+	} else {
+		ch.status = ChallengeRebutted
+	}
+
+	chain.Emit(
+		"ChallengeResolved",
+		"challenge_id", strconv.FormatUint(challengeID, 10),
+		"attestation_id", strconv.FormatUint(ch.attestationID, 10),
+		"outcome", ch.status,
+	)
 }
 
 // RevokeAttestation lets the original auditor mark an attestation as revoked.
@@ -380,11 +548,7 @@ func RevokeAttestation(cur realm, attestationID uint64, reason string) {
 
 // --- Read-only value getters ---
 
-func GetAttestation(id uint64) (AttestationView, bool) {
-	r := getAttestationRecord(id)
-	if r == nil {
-		return AttestationView{}, false
-	}
+func toAttestationView(r *attestationRecord) AttestationView {
 	return AttestationView{
 		ID:              r.id,
 		Auditor:         r.auditor,
@@ -407,22 +571,93 @@ func GetAttestation(id uint64) (AttestationView, bool) {
 		Status:          r.status,
 		RevokeReason:    r.revokeReason,
 		ChallengeCount:  r.challengeCount,
+		OpenChallenges:  r.openChallenges,
+	}
+}
+
+func GetAttestation(id uint64) (AttestationView, bool) {
+	r := getAttestationRecord(id)
+	if r == nil {
+		return AttestationView{}, false
+	}
+	return toAttestationView(r), true
+}
+
+func GetChallenge(id uint64) (ChallengeView, bool) {
+	c := getChallengeRecord(id)
+	if c == nil {
+		return ChallengeView{}, false
+	}
+	return ChallengeView{
+		ID:              c.id,
+		AttestationID:   c.attestationID,
+		Challenger:      c.challenger,
+		MissedRuleID:    c.missedRuleID,
+		EvidenceDigest:  c.evidenceDigest,
+		Reason:          c.reason,
+		Height:          c.height,
+		Status:          c.status,
+		AuditorResponse: c.auditorResponse,
+		ResolvedHeight:  c.resolvedHeight,
 	}, true
 }
 
-func GetLatestForPackage(targetPkgPath string) (AttestationView, bool) {
-	v := latestByPkg.Get(targetPkgPath)
+// GetLatestByAuditor returns the latest attestation by a specific auditor for targetPkgPath.
+func GetLatestByAuditor(targetPkgPath string, auditor address) (AttestationView, bool) {
+	v := latestByPkgAuditor.Get(targetPkgPath + "|" + auditor.String())
 	if v == nil {
 		return AttestationView{}, false
 	}
 	return GetAttestation(v.(uint64))
 }
 
+// GetLatestForPackage returns the most recent valid (non-revoked) attestation
+// across auditors for targetPkgPath (or most recent overall if all revoked).
+func GetLatestForPackage(targetPkgPath string) (AttestationView, bool) {
+	prefix := targetPkgPath + "|"
+	end := targetPkgPath + "}"
+	var fallback *attestationRecord
+	var best *attestationRecord
+	seen := 0
+	pkgAttestations.ReverseIterate(prefix, end, func(_ string, v any) bool {
+		seen++
+		r := getAttestationRecord(v.(uint64))
+		if r != nil {
+			if fallback == nil {
+				fallback = r
+			}
+			if r.status == StatusValid {
+				best = r
+				return true
+			}
+		}
+		return seen >= maxRenderRows
+	})
+	if best != nil {
+		return toAttestationView(best), true
+	}
+	if fallback != nil {
+		return toAttestationView(fallback), true
+	}
+	return AttestationView{}, false
+}
+
 func VerifyAttestationByDigest(digest string) (uint64, bool) {
 	if !pironclad.IsValidHexDigest(digest) {
 		return 0, false
 	}
-	v := digestIndex.Get(digest)
+	v := digestFirstIndex.Get(digest)
+	if v == nil {
+		return 0, false
+	}
+	return v.(uint64), true
+}
+
+func VerifyAttestationByDigestAndAuditor(digest string, auditor address) (uint64, bool) {
+	if !pironclad.IsValidHexDigest(digest) {
+		return 0, false
+	}
+	v := auditorDigestIndex.Get(digest + "|" + auditor.String())
 	if v == nil {
 		return 0, false
 	}
@@ -447,6 +682,9 @@ func GetAuditor(addr address) (AuditorView, bool) {
 
 // --- Pure read-only gnoweb Markdown + JSON Renderer ---
 
+// jsonEscape produces strict RFC 8259 JSON strings AND unicode-escapes Markdown
+// metacharacters ([ ] < > * _ | # ! `) so :json/* routes cannot inject active
+// Markdown links or structure when viewed in gnoweb (R7).
 func jsonEscape(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -463,6 +701,11 @@ func jsonEscape(s string) string {
 			b.WriteString(`\r`)
 		case '\t':
 			b.WriteString(`\t`)
+		case '[', ']', '<', '>', '*', '_', '|', '#', '!', '`':
+			b.WriteString(`\u00`)
+			const hexDigits = "0123456789abcdef"
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
 		default:
 			if c < 0x20 {
 				b.WriteString(" ")
@@ -475,16 +718,30 @@ func jsonEscape(s string) string {
 	return b.String()
 }
 
+func parsePage(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
 func Render(path string) string {
 	path = strings.Trim(path, "/")
 	if path == "" {
-		return renderHome()
+		return renderHome(1)
+	}
+	if strings.HasPrefix(path, "page/") {
+		return renderHome(parsePage(strings.TrimPrefix(path, "page/")))
 	}
 	if path == "taxonomy" {
 		return renderTaxonomy()
 	}
 	if path == "auditors" {
-		return renderAuditors()
+		return renderAuditors(1)
+	}
+	if strings.HasPrefix(path, "auditors/page/") {
+		return renderAuditors(parsePage(strings.TrimPrefix(path, "auditors/page/")))
 	}
 	if strings.HasPrefix(path, "attestation/") {
 		return renderAttestationDetail(strings.TrimPrefix(path, "attestation/"))
@@ -498,49 +755,59 @@ func Render(path string) string {
 	return "# Ironclad — Not Found\n\nUnknown path " + sanitize.InlineCode(path) + ".\n\n[Back to Home](:)\n"
 }
 
-func renderHome() string {
+func renderHome(page int) string {
 	var b strings.Builder
 	b.WriteString("# Ironclad — Gno Smart-Contract Security Attestation Registry\n\n")
-	b.WriteString("> Content-addressed on-chain audit certificates implementing Gno.land's official November 2026 Threat-Class Taxonomy (`gno-security.md`, `gno-ai-contract-review.md`, `AVL001`, `GLOBAL001`, `RENDER001`).\n\n")
+	b.WriteString("> Multi-auditor, content-addressed on-chain audit certificates implementing Gno.land's official November 2026 Threat-Class Taxonomy (`gno-security.md`, `gno-ai-contract-review.md`, `AVL001`, `GLOBAL001`, `RENDER001`).\n")
+	b.WriteString("> _Trust model: every attestation is an auditor-signed, self-reported claim bound to `(pkgPath, sourceHash, reportDigest)`. Inspect the auditor's identity and any open challenges before trusting a grade._\n\n")
 
 	b.WriteString("## Registry Telemetry\n\n")
 	b.WriteString("| Metric | Value |\n|---|---|\n")
-	b.WriteString(ufmt.Sprintf("| Chain ID | `%s` |\n", sanitize.InlineText(runtime.ChainID())))
+	b.WriteString(ufmt.Sprintf("| Chain ID | `%s` |\n", runtime.ChainID()))
 	b.WriteString(ufmt.Sprintf("| Block Height | `%d` |\n", runtime.ChainHeight()))
 	b.WriteString(ufmt.Sprintf("| Total Attestations | `%d` |\n", attestations.Size()))
-	b.WriteString(ufmt.Sprintf("| Distinct Attested Packages | `%d` |\n", latestByPkg.Size()))
+	b.WriteString(ufmt.Sprintf("| Distinct Attested Packages | `%d` |\n", pkgIndex.Size()))
 	b.WriteString(ufmt.Sprintf("| Registered Auditors | `%d` |\n", auditors.Size()))
 	b.WriteString(ufmt.Sprintf("| On-Chain Challenges | `%d` |\n\n", challenges.Size()))
 
-	b.WriteString("## Recent Security Attestations\n\n")
+	b.WriteString(ufmt.Sprintf("## Recent Security Attestations (Page %d)\n\n", page))
 	if attestations.Size() == 0 {
 		b.WriteString("_No audit attestations published yet._\n\n")
 	} else {
-		b.WriteString("| ID | Package | Grade | Score | Findings (C/H/M/L) | Status | Source Hash |\n|---|---|---|---|---|---|---|\n")
-		attestations.ReverseIterateByOffset(0, maxRenderRows, func(_ string, v any) bool {
+		offset := (page - 1) * maxRenderRows
+		b.WriteString("| ID | Package | Auditor | Grade | Score | Findings (C/H/M/L) | Status | Challenges | Source Hash |\n|---|---|---|---|---|---|---|---|---|\n")
+		attestations.ReverseIterateByOffset(offset, maxRenderRows, func(_ string, v any) bool {
 			r := v.(*attestationRecord)
-			shortSrc := r.sourceHash
-			if len(shortSrc) > 12 {
-				shortSrc = shortSrc[:12] + "..."
-			}
+			shortSrc := r.sourceHash[:12] + "..."
+			shortAud := r.auditor.String()[:12] + "..."
+			// R6: validated ASCII tokens placed cleanly inside backticks (no backslash artifacts).
 			b.WriteString(ufmt.Sprintf(
-				"| [%d](:attestation/%d) | [`%s`](:pkg/%s) | **%s** | `%d/100` | `%d/%d/%d/%d` | `%s` | `%s` |\n",
+				"| [%d](:attestation/%d) | [`%s`](:pkg/%s) | `%s` | **%s** | `%d/100` | `%d/%d/%d/%d` | `%s` | `%d` (%d open) | `%s` |\n",
 				r.id, r.id,
-				sanitize.TableCell(r.targetPkgPath),
-				sanitize.URL(r.targetPkgPath),
-				sanitize.TableCell(r.grade),
+				r.targetPkgPath,
+				r.targetPkgPath,
+				shortAud,
+				r.grade,
 				r.score,
 				r.critical, r.high, r.medium, r.low,
-				sanitize.TableCell(r.status),
-				sanitize.TableCell(shortSrc),
+				r.status,
+				r.challengeCount, r.openChallenges,
+				shortSrc,
 			))
 			return false
 		})
 		b.WriteString("\n")
+		if page > 1 {
+			b.WriteString(ufmt.Sprintf("[Prev Page](:page/%d) ", page-1))
+		}
+		if offset+maxRenderRows < attestations.Size() {
+			b.WriteString(ufmt.Sprintf("[Next Page](:page/%d)", page+1))
+		}
+		b.WriteString("\n\n")
 	}
 
 	b.WriteString("## Navigation\n\n")
-	b.WriteString("- [Threat-Class Taxonomy (14 Rules)](:taxonomy)\n")
+	b.WriteString("- [Threat-Class Taxonomy (15 Rules)](:taxonomy)\n")
 	b.WriteString("- [Auditor Directory](:auditors)\n")
 	b.WriteString("- Machine JSON: `:json/summary`, `:json/attestations`, `:json/pkg/<pkgPath>`, `:json/attestation/<id>`\n")
 	return b.String()
@@ -548,8 +815,10 @@ func renderHome() string {
 
 func renderTaxonomy() string {
 	var b strings.Builder
-	b.WriteString("# Ironclad — Official Gno Security Threat-Class Taxonomy\n\n[Back to Home](:)\n\n")
+	b.WriteString("# Ironclad — Official Gno Security Threat-Class Taxonomy (15 Rules)\n\n[Back to Home](:)\n\n")
 	b.WriteString("| Rule ID | Severity | Threat Class | Reference | Remediation |\n|---|---|---|---|---|\n")
+	// Include GNO-SEC01 explicitly alongside the 14 pure /p/ taxonomy entries so all 15 rules are listed.
+	b.WriteString("| `GNO-SEC01` | `CRITICAL` | Crossing function missing cur.IsCurrent() guard | `docs/resources/gno-ai-contract-review.md#1` | Call if !cur.IsCurrent() { panic(...) } before reading cur.Previous() or cur.Address(). |\n")
 	for _, tc := range pironclad.Taxonomy() {
 		b.WriteString(ufmt.Sprintf(
 			"| `%s` | `%s` | %s | `%s` | %s |\n",
@@ -559,15 +828,16 @@ func renderTaxonomy() string {
 	return b.String()
 }
 
-func renderAuditors() string {
+func renderAuditors(page int) string {
 	var b strings.Builder
-	b.WriteString("# Ironclad — Registered Auditors\n\n[Back to Home](:)\n\n")
+	b.WriteString(ufmt.Sprintf("# Ironclad — Registered Auditors (Page %d)\n\n[Back to Home](:)\n\n", page))
 	if auditors.Size() == 0 {
 		b.WriteString("_No auditors registered yet._\n")
 		return b.String()
 	}
+	offset := (page - 1) * maxRenderRows
 	b.WriteString("| Handle | Address | Attestations | Revocations | Bio |\n|---|---|---|---|---|\n")
-	auditors.ReverseIterateByOffset(0, maxRenderRows, func(_ string, v any) bool {
+	auditors.ReverseIterateByOffset(offset, maxRenderRows, func(_ string, v any) bool {
 		a := v.(*auditorRecord)
 		b.WriteString(ufmt.Sprintf(
 			"| **%s** | `%s` | `%d` | `%d` | %s |\n",
@@ -578,34 +848,85 @@ func renderAuditors() string {
 	return b.String()
 }
 
+// renderPackageDetail lists ALL auditors' attestations for a package (R2: multi-auditor view, no hijack).
 func renderPackageDetail(pkgPath string) string {
-	att, ok := GetLatestForPackage(pkgPath)
-	if !ok {
-		return "# Package Not Attested\n\nNo Ironclad audit attestation exists for " + sanitize.InlineCode(pkgPath) + ".\n\n[Back to Home](:)\n"
+	if !pironclad.ValidatePkgPath(pkgPath) {
+		return "# Invalid Package Path\n\nPath " + sanitize.InlineCode(pkgPath) + " is not a valid `gno.land/r/...` or `gno.land/p/...` path.\n\n[Back to Home](:)\n"
 	}
+	prefix := pkgPath + "|"
+	end := pkgPath + "}"
+
+	var rows []*attestationRecord
+	seen := 0
+	pkgAttestations.ReverseIterate(prefix, end, func(_ string, v any) bool {
+		seen++
+		if r := getAttestationRecord(v.(uint64)); r != nil {
+			rows = append(rows, r)
+		}
+		return seen >= maxRenderRows
+	})
+	if len(rows) == 0 {
+		return "# Package Not Attested\n\nNo Ironclad audit attestation exists for `" + pkgPath + "`.\n\n[Back to Home](:)\n"
+	}
+
+	// Compute multi-auditor consensus summary over active (non-revoked) latest per auditor
+	auditorSeen := make(map[string]bool)
+	activeCount := 0
+	scoreSum := 0
+	minScore := 101
+	for _, r := range rows {
+		ak := r.auditor.String()
+		if auditorSeen[ak] {
+			continue
+		}
+		auditorSeen[ak] = true
+		if r.status == StatusValid {
+			activeCount++
+			scoreSum += r.score
+			if r.score < minScore {
+				minScore = r.score
+			}
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString("# Security Certificate: " + sanitize.InlineCode(att.TargetPkgPath) + "\n\n")
-	b.WriteString("[Back to Home](:) | [Full Attestation #" + strconv.FormatUint(att.ID, 10) + "](:attestation/" + strconv.FormatUint(att.ID, 10) + ")\n\n")
-	b.WriteString(ufmt.Sprintf("> **Ironclad Grade: `%s` (`%d / 100`)** — Status: `%s` — Analyzer: `%s`\n\n",
-		sanitize.InlineText(att.Grade), att.Score, sanitize.InlineText(att.Status), sanitize.InlineText(att.AnalyzerVersion)))
-	if att.Summary != "" {
-		b.WriteString(sanitize.Block(att.Summary))
+	b.WriteString("# Security Certificates: `" + pkgPath + "`\n\n")
+	b.WriteString("[Back to Home](:) | [Taxonomy](:taxonomy)\n\n")
+	if activeCount > 0 {
+		avg := scoreSum / activeCount
+		b.WriteString(ufmt.Sprintf(
+			"> **Multi-Auditor Consensus (%d active auditor(s)):** Mean Score `%d/100` · Lowest Auditor Score `%d/100` _(all attestations are auditor-signed, self-reported claims)_\n\n",
+			activeCount, avg, minScore,
+		))
+	} else {
+		b.WriteString("> **Status:** All attestations for this package have been revoked.\n\n")
 	}
-	b.WriteString("| Field | Value |\n|---|---|\n")
-	b.WriteString("| Auditor | `" + att.Auditor.String() + "` |\n")
-	b.WriteString("| Source SHA-256 | `" + sanitize.TableCell(att.SourceHash) + "` |\n")
-	b.WriteString("| Report Digest | `" + sanitize.TableCell(att.ReportDigest) + "` |\n")
-	b.WriteString("| On-Chain Commitment | `" + sanitize.TableCell(att.Digest) + "` |\n")
-	b.WriteString(ufmt.Sprintf("| Findings | Critical `%d` · High `%d` · Medium `%d` · Low `%d` · Info `%d` |\n",
-		att.Critical, att.High, att.Medium, att.Low, att.Info))
-	if att.RulesTriggered != "" {
-		b.WriteString("| Rules Triggered | " + sanitize.InlineCode(att.RulesTriggered) + " |\n")
+
+	b.WriteString("## All On-Chain Attestations (Newest First)\n\n")
+	b.WriteString("| ID | Auditor | Grade | Score | Findings (C/H/M/L) | Status | Challenges | Source Hash | Block |\n|---|---|---|---|---|---|---|---|---|\n")
+	for _, r := range rows {
+		audLabel := r.auditor.String()[:12] + "..."
+		if aud := getAuditorRecord(r.auditor); aud != nil {
+			audLabel = sanitize.TableCell(aud.handle)
+		}
+		b.WriteString(ufmt.Sprintf(
+			"| [#%d](:attestation/%d) | %s | **%s** | `%d/100` | `%d/%d/%d/%d` | `%s` | `%d` (%d open) | `%s` | `%d` |\n",
+			r.id, r.id,
+			audLabel,
+			r.grade,
+			r.score,
+			r.critical, r.high, r.medium, r.low,
+			r.status,
+			r.challengeCount, r.openChallenges,
+			r.sourceHash[:12]+"...",
+			r.height,
+		))
 	}
-	b.WriteString(ufmt.Sprintf("| Challenges | `%d` |\n", att.ChallengeCount))
-	b.WriteString(ufmt.Sprintf("| Block Height | `%d` |\n", att.Height))
 	return b.String()
 }
 
+// renderAttestationDetail renders the EXACT requested attestation record (R1) plus
+// its revocation reason (if revoked) and bounded challenge/resolution log (R4).
 func renderAttestationDetail(rawID string) string {
 	id, err := strconv.ParseUint(rawID, 10, 64)
 	if err != nil {
@@ -617,19 +938,83 @@ func renderAttestationDetail(rawID string) string {
 	}
 	att, ok := GetAttestation(id)
 	if !ok {
-		return "# Attestation Not Found\n"
+		return "# Attestation Not Found\n\nNo attestation with ID `" + strconv.FormatUint(id, 10) + "`.\n"
 	}
-	return renderPackageDetail(att.TargetPkgPath)
+
+	var b strings.Builder
+	b.WriteString(ufmt.Sprintf("# Attestation #%d — `%s`\n\n", att.ID, att.TargetPkgPath))
+	b.WriteString(ufmt.Sprintf("[Back to Home](:) | [All Certificates for Package](:pkg/%s)\n\n", att.TargetPkgPath))
+	b.WriteString(ufmt.Sprintf(
+		"> **Self-Reported Auditor Grade: `%s` (`%d / 100`)** — Status: `%s` — Open Challenges: `%d` — Analyzer: `%s`\n\n",
+		att.Grade, att.Score, att.Status, att.OpenChallenges, att.AnalyzerVersion,
+	))
+	if att.Summary != "" {
+		b.WriteString(sanitize.Block(att.Summary))
+	}
+	if att.Status == StatusRevoked && att.RevokeReason != "" {
+		b.WriteString("**Revocation Reason:** " + sanitize.InlineText(att.RevokeReason) + "\n\n")
+	}
+
+	b.WriteString("| Field | Value |\n|---|---|\n")
+	b.WriteString("| Attestation ID | `#" + strconv.FormatUint(att.ID, 10) + "` |\n")
+	b.WriteString("| Target Package | `" + att.TargetPkgPath + "` |\n")
+	b.WriteString("| Auditor | `" + att.Auditor.String() + "` |\n")
+	b.WriteString("| Source SHA-256 | `" + att.SourceHash + "` |\n")
+	b.WriteString("| Report Digest | `" + att.ReportDigest + "` |\n")
+	b.WriteString("| On-Chain Commitment | `" + att.Digest + "` |\n")
+	b.WriteString(ufmt.Sprintf("| Findings | Critical `%d` · High `%d` · Medium `%d` · Low `%d` · Info `%d` |\n",
+		att.Critical, att.High, att.Medium, att.Low, att.Info))
+	if att.RulesTriggered != "" {
+		b.WriteString("| Rules Triggered | `" + att.RulesTriggered + "` |\n")
+	}
+	if att.ReportURL != "" {
+		b.WriteString("| Report URL | " + sanitize.TableCell(att.ReportURL) + " |\n")
+	}
+	b.WriteString(ufmt.Sprintf("| Block Height | `%d` |\n\n", att.Height))
+
+	// R4: Render bounded challenge & auditor resolution table for this attestation
+	b.WriteString("## Challenges & Auditor Responses\n\n")
+	chPrefix := seqid.ID(att.ID).Binary() + "|"
+	chEnd := seqid.ID(att.ID).Binary() + "}"
+	chCount := 0
+	var chBuf strings.Builder
+	attChallenges.ReverseIterate(chPrefix, chEnd, func(_ string, v any) bool {
+		chCount++
+		c := getChallengeRecord(v.(uint64))
+		if c != nil {
+			resp := "—"
+			if c.auditorResponse != "" {
+				resp = sanitize.TableCell(c.auditorResponse)
+			}
+			chBuf.WriteString(ufmt.Sprintf(
+				"| `#%d` | `%s` | `%s` | `%s` | %s | %s |\n",
+				c.id,
+				c.missedRuleID,
+				c.status,
+				c.challenger.String()[:12]+"...",
+				sanitize.TableCell(c.reason),
+				resp,
+			))
+		}
+		return chCount >= maxRenderRows
+	})
+	if chCount == 0 {
+		b.WriteString("_No challenges filed against this attestation._\n")
+	} else {
+		b.WriteString("| ID | Rule | Outcome | Challenger | Reason | Auditor Response |\n|---|---|---|---|---|---|\n")
+		b.WriteString(chBuf.String())
+	}
+	return b.String()
 }
 
 func attestationJSON(r *attestationRecord) string {
 	return ufmt.Sprintf(
-		`{"id":%d,"auditor":%s,"targetPkgPath":%s,"sourceHash":%s,"reportDigest":%s,"digest":%s,"analyzerVersion":%s,"critical":%d,"high":%d,"medium":%d,"low":%d,"info":%d,"score":%d,"grade":%s,"rulesTriggered":%s,"summary":%s,"reportUrl":%s,"height":%d,"status":%s,"revokeReason":%s,"challengeCount":%d}`,
+		`{"id":%d,"auditor":%s,"targetPkgPath":%s,"sourceHash":%s,"reportDigest":%s,"digest":%s,"analyzerVersion":%s,"critical":%d,"high":%d,"medium":%d,"low":%d,"info":%d,"score":%d,"grade":%s,"rulesTriggered":%s,"summary":%s,"reportUrl":%s,"height":%d,"status":%s,"revokeReason":%s,"challengeCount":%d,"openChallenges":%d}`,
 		r.id, jsonEscape(r.auditor.String()), jsonEscape(r.targetPkgPath), jsonEscape(r.sourceHash),
 		jsonEscape(r.reportDigest), jsonEscape(r.digest), jsonEscape(r.analyzerVersion),
 		r.critical, r.high, r.medium, r.low, r.info, r.score, jsonEscape(r.grade),
 		jsonEscape(r.rulesTriggered), jsonEscape(r.summary), jsonEscape(r.reportURL),
-		r.height, jsonEscape(r.status), jsonEscape(r.revokeReason), r.challengeCount,
+		r.height, jsonEscape(r.status), jsonEscape(r.revokeReason), r.challengeCount, r.openChallenges,
 	)
 }
 
@@ -641,7 +1026,7 @@ func renderJSON(sub string) string {
 			jsonEscape(runtime.ChainID()),
 			runtime.ChainHeight(),
 			attestations.Size(),
-			latestByPkg.Size(),
+			pkgIndex.Size(),
 			auditors.Size(),
 			challenges.Size(),
 		)
@@ -663,12 +1048,34 @@ func renderJSON(sub string) string {
 	}
 	if strings.HasPrefix(sub, "pkg/") {
 		pkgPath := strings.TrimPrefix(sub, "pkg/")
-		if v := latestByPkg.Get(pkgPath); v != nil {
-			if r := getAttestationRecord(v.(uint64)); r != nil {
+		if att, ok := GetLatestForPackage(pkgPath); ok {
+			if r := getAttestationRecord(att.ID); r != nil {
 				return attestationJSON(r)
 			}
 		}
 		return `{"error":"not_found"}`
+	}
+	if strings.HasPrefix(sub, "pkg-all/") {
+		pkgPath := strings.TrimPrefix(sub, "pkg-all/")
+		prefix := pkgPath + "|"
+		end := pkgPath + "}"
+		var b strings.Builder
+		b.WriteByte('[')
+		first := true
+		seen := 0
+		pkgAttestations.ReverseIterate(prefix, end, func(_ string, v any) bool {
+			seen++
+			if r := getAttestationRecord(v.(uint64)); r != nil {
+				if !first {
+					b.WriteByte(',')
+				}
+				first = false
+				b.WriteString(attestationJSON(r))
+			}
+			return seen >= maxRenderRows
+		})
+		b.WriteByte(']')
+		return b.String()
 	}
 	if strings.HasPrefix(sub, "attestation/") {
 		raw := strings.TrimPrefix(sub, "attestation/")

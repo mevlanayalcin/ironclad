@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   test-and-scan:
     runs-on: ubuntu-latest
@@ -15,11 +19,17 @@ jobs:
           go-version: '1.24'
       - name: Go static analyzer unit tests
         run: go test -race -v ./...
-      - name: Build CLI and self-scan Ironclad realm (SARIF v2.1.0)
+      - name: Build CLI, WASM engine, and self-scan Ironclad realm (SARIF v2.1.0)
         run: |
           go build -o ./bin/ironclad ./cmd/ironclad
+          GOOS=js GOARCH=wasm go build -ldflags="-s -w" -o /tmp/ironclad.wasm ./cmd/ironclad-wasm
           ./bin/ironclad scan --pkg gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad --fail-on-high ./gno/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
           ./bin/ironclad scan --pkg gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad --format sarif ./gno/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad > ironclad.sarif
+      - name: Upload SARIF report to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: ironclad.sarif
       - name: Download Gno v1.8.0-rc.1 and run gno test & lint
         run: |
           curl -sSL https://github.com/gnolang/gno/releases/download/v1.8.0-rc.1/gno_linux_amd64 -o /tmp/gno

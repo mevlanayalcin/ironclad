@@ -1,6 +1,5 @@
 // Command ironclad-server serves the live Ironclad Web Security Scanner API
-// and static UI, enabling instant analysis of pasted .gno code or live onyx-1
-// realms fetched via vm/qfile alongside on-chain attestation lookup.
+// and static UI with strict RPC host allowlisting (SSRF-hardened).
 package main
 
 import (
@@ -8,11 +7,25 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mevlanayalcin/ironclad/pkg/analyzer"
 )
+
+func isAllowedRPC(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "127.0.0.1" || host == "localhost" {
+		return true
+	}
+	return u.Scheme == "https" && (host == "rpc.onyx.testnets.gno.land" || strings.HasSuffix(host, ".gno.land"))
+}
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8502", "HTTP listen address")
@@ -32,7 +45,7 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, analyzer.RuleCatalog)
+		writeJSON(w, http.StatusOK, analyzer.SortedRuleMetas())
 	})
 
 	mux.HandleFunc("POST /api/scan/source", func(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +56,7 @@ func main() {
 			ChainID  string `json:"chainId"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request json"})
 			return
 		}
 		if req.Filename == "" {
@@ -70,18 +83,22 @@ func main() {
 			ChainID string `json:"chainId"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request json"})
 			return
 		}
 		if req.RPC == "" {
 			req.RPC = *defaultRPC
+		}
+		if !isAllowedRPC(req.RPC) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "rpc host not in allowlist (*.gno.land or localhost)"})
+			return
 		}
 		if req.ChainID == "" {
 			req.ChainID = "onyx-1"
 		}
 		files, err := analyzer.FetchRemotePackage(r.Context(), req.RPC, req.PkgPath)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "failed to fetch package from RPC"})
 			return
 		}
 		rep := analyzer.AnalyzeSources(req.PkgPath, files)

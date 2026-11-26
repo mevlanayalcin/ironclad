@@ -12,79 +12,116 @@ import (
 
 func resetState() {
 	auditors = avl.NewTree()
+	handleIndex = avl.NewTree()
 	attestations = avl.NewTree()
-	latestByPkg = avl.NewTree()
-	digestIndex = avl.NewTree()
+	pkgIndex = avl.NewTree()
+	latestByPkgAuditor = avl.NewTree()
+	pkgAttestations = avl.NewTree()
+	auditorDigestIndex = avl.NewTree()
+	digestFirstIndex = avl.NewTree()
 	challenges = avl.NewTree()
+	attChallenges = avl.NewTree()
 	nextAttestID = 0
-	nextChallengID = 0
+	nextChallengeID = 0
 }
 
-func TestAttestationLifecycleChallengeAndSanitization(cur realm, t *testing.T) {
+func TestRegressionAllFable52Findings(cur realm, t *testing.T) {
 	defer resetState()
 
-	auditor := testutils.TestAddress("auditor1")
+	auditor1 := testutils.TestAddress("auditor1")
+	auditor2 := testutils.TestAddress("auditor2")
 	researcher := testutils.TestAddress("researcher1")
 	srcHash := "1111111111111111111111111111111111111111111111111111111111111111"
 	repHash := "2222222222222222222222222222222222222222222222222222222222222222"
 	evHash := "3333333333333333333333333333333333333333333333333333333333333333"
 
-	testing.SetRealm(testing.NewUserRealm(auditor))
-	RegisterAuditor(cross(cur), "Ironclad | Core", "Automated Gno security auditor", "https://ironclad.example")
+	// P1: Unique auditor handles
+	testing.SetRealm(testing.NewUserRealm(auditor1))
+	RegisterAuditor(cross(cur), "Ironclad | Core", "Automated auditor", "https://ironclad.example")
+	testing.SetRealm(testing.NewUserRealm(auditor2))
+	uassert.AbortsWithMessage(t, cur, "ironclad: auditor handle already taken", func() {
+		RegisterAuditor(cross(cur), "ironclad | core", "Impersonator", "")
+	})
+	RegisterAuditor(cross(cur), "SecondAuditor", "Independent reviewer", "")
 
-	aid := PublishAttestation(
-		cross(cur),
-		"gno.land/r/demo/tollgate",
-		srcHash,
-		repHash,
-		"ironclad-1.0.0",
-		0, 0, 0, 0, 0,
-		"",
-		"Zero findings across all 14 threat classes.",
-		"https://github.com/mevlanayalcin/ironclad",
-	)
-	uassert.Equal(t, uint64(1), aid)
-
-	att, ok := GetLatestForPackage("gno.land/r/demo/tollgate")
-	urequire.True(t, ok)
-	uassert.Equal(t, 100, att.Score)
-	uassert.Equal(t, "A+", att.Grade)
-	uassert.Equal(t, StatusValid, att.Status)
-
-	foundID, ok := VerifyAttestationByDigest(att.Digest)
-	urequire.True(t, ok)
-	uassert.Equal(t, aid, foundID)
-
-	// Duplicate identical attestation must fail
-	uassert.AbortsWithMessage(t, cur, "ironclad: identical attestation already published", func() {
-		PublishAttestation(cross(cur), "gno.land/r/demo/tollgate", srcHash, repHash, "ironclad-1.0.0", 0, 0, 0, 0, 0, "", "dup", "")
+	// R5: Overflow counts must abort
+	uassert.AbortsWithMessage(t, cur, "ironclad: finding counts out of bounds (0..100000)", func() {
+		PublishAttestation(cross(cur), "gno.land/r/demo/vault", srcHash, repHash, "ironclad-1.0.0", 0, 0, 0, 100001, 0, "", "overflow", "")
 	})
 
-	// Security researcher challenges attestation
+	// R8: Invalid rulesTriggered charset/token must abort
+	uassert.AbortsWithMessage(t, cur, "ironclad: invalid rulesTriggered (must be comma-separated known rule IDs)", func() {
+		PublishAttestation(cross(cur), "gno.land/r/demo/vault", srcHash, repHash, "ironclad-1.0.0", 1, 0, 0, 0, 0, "GNO-TC2|`evil`", "bad rules", "")
+	})
+
+	// R2 & R3: Auditor 1 publishes F (2 criticals), Auditor 2 publishes SAME digest & A+ without collision or hijacking Auditor 1
+	testing.SetRealm(testing.NewUserRealm(auditor1))
+	id1 := PublishAttestation(cross(cur), "gno.land/r/demo/vault", srcHash, repHash, "ironclad-1.0.0", 2, 0, 0, 0, 0, "GNO-TC2,GNO-SEC01", "Critical auth bugs [click](https://evil.example)", "")
+	uassert.Equal(t, uint64(1), id1)
+
+	// Same auditor duplicate active digest must fail
+	uassert.AbortsWithMessage(t, cur, "ironclad: you already published an active identical attestation", func() {
+		PublishAttestation(cross(cur), "gno.land/r/demo/vault", srcHash, repHash, "ironclad-1.0.0", 2, 0, 0, 0, 0, "GNO-TC2,GNO-SEC01", "dup", "")
+	})
+
+	// R3: Second auditor publishing identical digest succeeds (no squatting)
+	testing.SetRealm(testing.NewUserRealm(auditor2))
+	id2 := PublishAttestation(cross(cur), "gno.land/r/demo/vault", srcHash, repHash, "ironclad-1.0.0", 2, 0, 0, 0, 0, "GNO-TC2,GNO-SEC01", "Independent confirmation", "")
+	uassert.Equal(t, uint64(2), id2)
+
+	// R1: Render("attestation/1") MUST render Attestation #1, NOT #2!
+	att1Page := Render("attestation/1")
+	uassert.True(t, strings.Contains(att1Page, "# Attestation #1"))
+	uassert.True(t, strings.Contains(att1Page, auditor1.String()))
+	uassert.False(t, strings.Contains(att1Page, "# Attestation #2"))
+
+	// R2: Render("pkg/gno.land/r/demo/vault") shows BOTH auditors
+	pkgPage := Render("pkg/gno.land/r/demo/vault")
+	uassert.True(t, strings.Contains(pkgPage, "Multi-Auditor Consensus (2 active auditor(s))"))
+	uassert.True(t, strings.Contains(pkgPage, "#1"))
+	uassert.True(t, strings.Contains(pkgPage, "#2"))
+
+	// R4: Challenge does NOT flip status; validates missedRuleID; supports auditor rebuttal & acceptance
 	testing.SetRealm(testing.NewUserRealm(researcher))
-	cid := ChallengeAttestation(cross(cur), aid, "GNO-TC3", evHash, "Unchecked Teller interface parameter in helper")
-	uassert.Equal(t, uint64(1), cid)
-
-	attCh, _ := GetAttestation(aid)
-	uassert.Equal(t, StatusChallenged, attCh.Status)
-	uassert.Equal(t, 1, attCh.ChallengeCount)
-
-	// Non-auditor cannot revoke
-	uassert.AbortsWithMessage(t, cur, "ironclad: only original auditor may revoke attestation", func() {
-		RevokeAttestation(cross(cur), aid, "not mine")
+	uassert.AbortsWithMessage(t, cur, "ironclad: unknown missedRuleID (must match official Ironclad taxonomy rule)", func() {
+		ChallengeAttestation(cross(cur), id1, "FAKE-999", evHash, "invalid rule")
 	})
+	ch1 := ChallengeAttestation(cross(cur), id1, "GNO-TC3", evHash, "Missed unchecked interface param")
+	uassert.Equal(t, uint64(1), ch1)
 
-	// Original auditor revokes
-	testing.SetRealm(testing.NewUserRealm(auditor))
-	RevokeAttestation(cross(cur), aid, "Superseded by patched v2 audit")
-	attRev, _ := GetAttestation(aid)
-	uassert.Equal(t, StatusRevoked, attRev.Status)
+	att1AfterCh, _ := GetAttestation(id1)
+	uassert.Equal(t, StatusValid, att1AfterCh.Status) // NOT flipped by anonymous griefing!
+	uassert.Equal(t, 1, att1AfterCh.OpenChallenges)
+	cv, ok := GetChallenge(ch1)
+	urequire.True(t, ok)
+	uassert.Equal(t, ChallengeOpen, cv.Status)
 
-	// Verify Markdown sanitization and JSON routes
+	// Auditor 1 rebuts ch1
+	testing.SetRealm(testing.NewUserRealm(auditor1))
+	RespondToChallenge(cross(cur), ch1, false, "Interface is checked via type switch on line 44")
+	cvAfter, _ := GetChallenge(ch1)
+	uassert.Equal(t, ChallengeRebutted, cvAfter.Status)
+	att1AfterRebut, _ := GetAttestation(id1)
+	uassert.Equal(t, 0, att1AfterRebut.OpenChallenges)
+	uassert.Equal(t, StatusValid, att1AfterRebut.Status)
+
+	// Second challenge accepted -> auto-revokes attestation & displays revokeReason
+	testing.SetRealm(testing.NewUserRealm(researcher))
+	ch2 := ChallengeAttestation(cross(cur), id1, "AVL001", evHash, "Unbounded Iterate found")
+	testing.SetRealm(testing.NewUserRealm(auditor1))
+	RespondToChallenge(cross(cur), ch2, true, "Confirmed unbounded loop; revoking for v2")
+	att1Rev, _ := GetAttestation(id1)
+	uassert.Equal(t, StatusRevoked, att1Rev.Status)
+	uassert.True(t, strings.Contains(Render("attestation/1"), "Revocation Reason:"))
+	uassert.True(t, strings.Contains(Render("attestation/1"), "AVL001"))
+
+	// R6: Home page has no literal backslash escapes inside code spans
 	home := Render("")
-	uassert.True(t, strings.Contains(home, "Ironclad"))
-	audPage := Render("auditors")
-	uassert.True(t, strings.Contains(audPage, `\|`))
-	js := Render("json/summary")
-	uassert.True(t, strings.Contains(js, `"protocol":"ironclad-v1"`))
+	uassert.False(t, strings.Contains(home, `gno\.land`))
+	uassert.True(t, strings.Contains(home, "15 Rules"))
+
+	// R7: :json/* escapes Markdown link syntax ([click](...)) as \u005b...\u005d
+	jsonOut := Render("json/attestation/1")
+	uassert.False(t, strings.Contains(jsonOut, "[click]"))
+	uassert.True(t, strings.Contains(jsonOut, `\u005bclick\u005d`))
 }
