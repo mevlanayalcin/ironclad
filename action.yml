@@ -1,0 +1,85 @@
+name: "Ironclad Gno.land Security Scanner"
+description: "Deterministic 15-rule Go AST static security analyzer for Gno.land smart contracts (gno-security.md + PR #5068) with SARIF v2.1.0 output."
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  target:
+    description: "Local directory path or live Gno.land package path (when remote is set)"
+    required: true
+  pkg:
+    description: "Canonical Gno.land package path label for local scans (e.g. gno.land/r/user/app)"
+    required: false
+    default: ""
+  remote:
+    description: "Optional Gno RPC URL for live vm/qfile scanning (e.g. https://rpc.onyx.testnets.gno.land:443)"
+    required: false
+    default: ""
+  chain-id:
+    description: "Gno chain ID for canonical AttestationDigest calculation"
+    required: false
+    default: "onyx-1"
+  sarif-file:
+    description: "Optional path to write SARIF v2.1.0 report for GitHub Code Scanning"
+    required: false
+    default: "ironclad.sarif"
+  fail-on-high:
+    description: "Fail the workflow if any CRITICAL or HIGH findings are detected"
+    required: false
+    default: "true"
+
+outputs:
+  grade:
+    description: "Security letter grade (A+ to F)"
+    value: ${{ steps.scan.outputs.grade }}
+  score:
+    description: "Numeric security score (0-100)"
+    value: ${{ steps.scan.outputs.score }}
+  sarif-file:
+    description: "Path to generated SARIF v2.1.0 file"
+    value: ${{ steps.scan.outputs.sarif_file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build Ironclad CLI
+      shell: bash
+      run: |
+        cd "${{ github.action_path }}"
+        go build -o "${{ runner.temp }}/ironclad-bin" ./cmd/ironclad
+
+    - name: Run Ironclad Security Scan
+      id: scan
+      shell: bash
+      env:
+        IC_TARGET: ${{ inputs.target }}
+        IC_PKG: ${{ inputs.pkg }}
+        IC_REMOTE: ${{ inputs.remote }}
+        IC_CHAIN_ID: ${{ inputs.chain-id }}
+        IC_SARIF: ${{ inputs.sarif-file }}
+        IC_FAIL_HIGH: ${{ inputs.fail-on-high }}
+      run: |
+        set -euo pipefail
+        BIN="${{ runner.temp }}/ironclad-bin"
+        ARGS=(scan -chain-id "$IC_CHAIN_ID")
+        if [[ -n "$IC_REMOTE" ]]; then
+          ARGS+=(-remote "$IC_REMOTE")
+        elif [[ -n "$IC_PKG" ]]; then
+          ARGS+=(-pkg "$IC_PKG")
+        fi
+
+        "$BIN" "${ARGS[@]}" -format sarif "$IC_TARGET" > "$IC_SARIF"
+        JSON_OUT=$("$BIN" "${ARGS[@]}" -format json "$IC_TARGET")
+        GRADE=$(python3 -c "import json,sys; print(json.load(sys.stdin)['grade'])" <<< "$JSON_OUT")
+        SCORE=$(python3 -c "import json,sys; print(json.load(sys.stdin)['score'])" <<< "$JSON_OUT")
+
+        echo "grade=$GRADE" >> "$GITHUB_OUTPUT"
+        echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+        echo "sarif_file=$IC_SARIF" >> "$GITHUB_OUTPUT"
+
+        TEXT_ARGS=("${ARGS[@]}")
+        if [[ "$IC_FAIL_HIGH" == "true" ]]; then
+          TEXT_ARGS+=(-fail-on-high)
+        fi
+        "$BIN" "${TEXT_ARGS[@]}" "$IC_TARGET"

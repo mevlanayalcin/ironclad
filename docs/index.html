@@ -3,67 +3,193 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Ironclad — Gno Smart-Contract Security Analyzer &amp; Attestation Explorer</title>
+  <title>Ironclad — Gno.land Security Analyzer, WASM Verifier &amp; On-Chain Registry</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="wrap">
     <header>
       <div>
-        <h1>Ironclad Security Suite</h1>
-        <p class="sub">Go AST static analyzer (compiled to WebAssembly for zero-backend exact CLI parity) enforcing Gno.land's official Threat-Class Taxonomy (<code>gno-security.md</code>, <code>gno-ai-contract-review.md</code>, <code>AVL001</code>, <code>GLOBAL001</code>, <code>RENDER001</code>)</p>
+        <h1><span class="logo-mark">IC</span> Ironclad Security Suite</h1>
+        <p class="sub">Deterministic 15-rule Go AST static analyzer (compiled to reproducible WebAssembly) enforcing Gno.land's official Threat-Class Taxonomy (<code>gno-security.md</code>, <code>gno-ai-contract-review.md</code>, PR <code>#5068</code>) with live <code>onyx-1</code> multi-auditor attestation &amp; Adena Wallet broadcasting.</p>
       </div>
-      <div class="badges">
-        <span class="badge">15 Go AST Rules + PARSE-ERR</span>
-        <span class="badge ok" id="healthBadge">Engine: loading Go WASM…</span>
+      <div class="header-right">
+        <div class="badges">
+          <span class="badge">15 AST Rules + PARSE-ERR</span>
+          <span class="badge ok" id="healthBadge">Engine: loading Go WASM…</span>
+          <button id="connectAdenaBtn" class="adena">Connect Adena Wallet</button>
+        </div>
+        <div class="wallet-status" id="walletStatus">Adena: not connected · Registry: <a href="https://onyx.testnets.gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad" target="_blank" rel="noopener">gno.land/r/g1zt…/ironclad</a></div>
       </div>
     </header>
 
-    <section class="grid-2">
+    <section class="stats-strip">
+      <div class="stat"><div class="k">On-Chain Attestations</div><div class="v ok" id="statAttest">—</div></div>
+      <div class="stat"><div class="k">Packages Audited</div><div class="v" id="statPkgs">—</div></div>
+      <div class="stat"><div class="k">Registered Auditors</div><div class="v" id="statAuditors">—</div></div>
+      <div class="stat"><div class="k">Challenges Logged</div><div class="v" id="statChallenges">—</div></div>
+      <div class="stat"><div class="k">onyx-1 Block Height</div><div class="v" id="statHeight">—</div></div>
+    </section>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="registry">1. Live onyx-1 Registry &amp; WASM Verifier</button>
+      <button class="tab-btn" data-tab="scanner">2. Live Package Scanner &amp; Adena Attest</button>
+      <button class="tab-btn" data-tab="playground">3. Threat-Class Exploit &amp; Auto-Fix Lab</button>
+    </nav>
+
+    <!-- TAB 1: LIVE ON-CHAIN REGISTRY + TRUSTLESS WASM VERIFICATION -->
+    <section id="tab-registry" class="tab-panel active">
       <div class="card">
-        <h2>Scan Live On-Chain Package (<code>onyx-1</code> / <code>gnodev</code>)</h2>
-        <p class="muted">Fetches live <code>.gno</code> files directly via ABCI <code>vm/qfile</code>, executes the exact Go AST engine (via server API or local WebAssembly), computes canonical SHA-256 digests, and joins multi-auditor on-chain attestations.</p>
-        <div class="row">
-          <div class="field">
-            <label for="rpcInput">Gno RPC URL</label>
-            <input id="rpcInput" value="https://rpc.onyx.testnets.gno.land:443" />
+        <h2>
+          <span>Live <code>onyx-1</code> On-Chain Attestation Registry</span>
+          <span style="display:flex;gap:8px;flex-wrap:wrap">
+            <button id="verifyAllWasmBtn">Re-Verify All Live in WASM</button>
+            <button id="registerAuditorBtn" class="adena secondary">Register Auditor (Adena)</button>
+            <button id="refreshRegistryBtn" class="secondary">Refresh Chain</button>
+          </span>
+        </h2>
+        <p class="muted">Every row below is loaded directly from <code>r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad:json/attestations</code> via ABCI RPC. Click <strong>Verify WASM</strong> to fetch the live contract source via <code>vm/qfile</code>, re-run deterministic <code>ironclad.wasm</code> in your browser, and verify the on-chain SHA-256 <code>SourceHash</code>, <code>ReportDigest</code>, and <code>AttestDigest</code> bit-for-bit.</p>
+
+        <div id="registerAuditorBox" class="modal-inline">
+          <h3 style="margin-top:0">Register Your On-Chain Auditor Profile (via Adena Wallet)</h3>
+          <div class="row">
+            <div class="field"><label>Auditor Handle</label><input id="audHandleInput" placeholder="e.g. GnoSecurityLab" /></div>
+            <div class="field"><label>Bio</label><input id="audBioInput" placeholder="Deterministic AST security reviewer on onyx-1" /></div>
+            <div class="field"><label>Website URL (optional)</label><input id="audUrlInput" placeholder="https://github.com/yourhandle" /></div>
+            <button id="submitAuditorBtn" class="adena">Broadcast RegisterAuditor</button>
+            <button id="closeAuditorBtn" class="secondary">Close</button>
           </div>
-          <div class="field">
-            <label for="pkgInput">Package / Realm Path</label>
-            <input id="pkgInput" value="gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad" />
-          </div>
-        </div>
-        <div class="row">
-          <button id="scanRemoteBtn">Fetch &amp; Scan Live Realm</button>
-          <button id="scanTollgateBtn" class="secondary">Scan Tollgate Realm</button>
-          <button id="scanNameregBtn" class="secondary">Scan r/sys/namereg/v0</button>
-          <button id="scanBlogBtn" class="secondary">Scan r/gnoland/blog</button>
+          <pre id="auditorTxOut" style="display:none;margin-top:8px"></pre>
         </div>
 
-        <hr style="border:none;border-top:1px solid var(--border);margin:18px 0" />
-
-        <h2>Paste Gno Source Code (Instant AST Sandbox)</h2>
-        <div class="row">
-          <button id="loadVulnBtn" class="secondary">Load Vulnerable Fixture</button>
-          <button id="loadSafeBtn" class="secondary">Load Clean A+ Fixture</button>
-          <button id="scanSourceBtn">Analyze Source</button>
+        <div id="challengeBox" class="modal-inline">
+          <h3 style="margin-top:0">Submit Structured Challenge (via Adena Wallet) — Attestation #<span id="chAttIdLabel"></span></h3>
+          <div class="row">
+            <div class="field" style="max-width:210px">
+              <label>Missed Official Rule ID</label>
+              <select id="chRuleSelect">
+                <option value="GNO-TC1A">GNO-TC1A (Class-1a)</option>
+                <option value="GNO-TC1B">GNO-TC1B (Class-1b)</option>
+                <option value="GNO-TC2">GNO-TC2 (Class-2)</option>
+                <option value="GNO-TC3">GNO-TC3 (Class-3)</option>
+                <option value="GNO-TC4">GNO-TC4 (Class-4)</option>
+                <option value="GNO-SEC01">GNO-SEC01</option>
+                <option value="GNO-SEC02">GNO-SEC02</option>
+                <option value="GNO-SEC03">GNO-SEC03</option>
+                <option value="GNO-SEC04">GNO-SEC04</option>
+                <option value="GNO-SEC05">GNO-SEC05</option>
+                <option value="GNO-SEC06">GNO-SEC06</option>
+                <option value="GNO-SEC07">GNO-SEC07</option>
+                <option value="AVL001">AVL001</option>
+                <option value="GLOBAL001">GLOBAL001</option>
+                <option value="RENDER001">RENDER001</option>
+              </select>
+            </div>
+            <div class="field"><label>Technical Challenge Reason (evidence SHA-256 auto-computed via WebCrypto)</label><input id="chReasonInput" placeholder="Describe missed finding file:line and exploit path" /></div>
+            <button id="submitChallengeBtn" class="warn-btn">Broadcast ChallengeAttestation</button>
+            <button id="closeChallengeBtn" class="secondary">Close</button>
+          </div>
+          <pre id="challengeTxOut" style="display:none;margin-top:8px"></pre>
         </div>
-        <textarea id="sourceArea" spellcheck="false"></textarea>
+
+        <div style="overflow-x:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Package / Realm</th>
+                <th>Grade</th>
+                <th>Findings (C/H/M/L)</th>
+                <th>Block</th>
+                <th>Status</th>
+                <th>Trustless WASM Proof</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="registryTableBody">
+              <tr><td colspan="8" class="muted">Loading live onyx-1 attestations…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
+    </section>
 
-      <div class="card">
-        <h2>Audit Verdict &amp; Findings</h2>
-        <div class="score-banner" id="scoreBanner">
-          <div class="grade-box" id="gradeBox">—</div>
-          <div>
-            <div style="font-weight:700;font-size:1.05rem" id="verdictTitle">Ready to scan</div>
-            <div class="muted" id="verdictMeta">Select a live realm on onyx-1 or analyze Gno source code.</div>
-            <div class="muted" style="font-family:var(--mono);font-size:0.74rem;margin-top:4px" id="digestLine"></div>
+    <!-- TAB 2: LIVE PACKAGE SCANNER & ADENA ATTEST -->
+    <section id="tab-scanner" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <h2>Scan Any Live On-Chain Package (<code>vm/qfile</code>)</h2>
+          <p class="muted">Fetches every non-test <code>.gno</code> file directly from the chain over ABCI RPC, runs the exact Go AST engine compiled to WebAssembly, and lets you publish a signed attestation via Adena Wallet or export SARIF v2.1.0.</p>
+          <div class="row">
+            <div class="field"><label for="rpcInput">Gno RPC URL</label><input id="rpcInput" value="https://rpc.onyx.testnets.gno.land:443" /></div>
+            <div class="field"><label for="pkgInput">Package / Realm Path</label><input id="pkgInput" value="gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad" /></div>
           </div>
+          <div class="chips" id="quickPkgChips">
+            <span class="chip" data-pkg="gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad">r/.../ironclad (A+)</span>
+            <span class="chip" data-pkg="gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/tollgate/v2">r/.../tollgate/v2 (A+)</span>
+            <span class="chip" data-pkg="gno.land/r/sys/namereg/v0">r/sys/namereg/v0 (A)</span>
+            <span class="chip" data-pkg="gno.land/r/gnoland/wugnot">r/gnoland/wugnot (A)</span>
+            <span class="chip" data-pkg="gno.land/r/sys/params">r/sys/params (A)</span>
+            <span class="chip" data-pkg="gno.land/r/sys/validators/v2">r/sys/validators/v2 (B)</span>
+            <span class="chip" data-pkg="gno.land/r/gnoland/blog">r/gnoland/blog (D)</span>
+            <span class="chip" data-pkg="gno.land/r/sys/users">r/sys/users (D)</span>
+            <span class="chip" data-pkg="gno.land/r/gov/dao">r/gov/dao (F)</span>
+            <span class="chip" data-pkg="gno.land/r/gnoland/boards2/v0">r/gnoland/boards2/v0 (F)</span>
+          </div>
+          <div class="row">
+            <button id="scanRemoteBtn">Fetch &amp; Scan Live Realm</button>
+            <button id="publishAdenaBtn" class="adena" disabled>Publish Attestation (Adena)</button>
+            <button id="exportSarifBtn" class="secondary" disabled>Download SARIF v2.1.0</button>
+            <button id="exportJsonBtn" class="secondary" disabled>Download JSON</button>
+          </div>
+          <pre id="publishTxOut" style="display:none;margin-bottom:12px"></pre>
+          <h3>Live On-Chain Certificate &amp; Reproducible CLI Command</h3>
+          <pre id="attestationBox">Select a live realm above and click "Fetch &amp; Scan Live Realm".</pre>
         </div>
-        <div id="findingsList"></div>
-        <h2 style="margin-top:16px">On-Chain Attestation Certificate</h2>
-        <pre id="attestationBox">No on-chain attestation loaded yet.</pre>
+
+        <div class="card">
+          <h2>Audit Verdict &amp; AST Findings</h2>
+          <div class="score-banner" id="scoreBanner">
+            <div class="grade-box" id="gradeBox">—</div>
+            <div>
+              <div style="font-weight:700;font-size:1.05rem" id="verdictTitle">Ready to scan</div>
+              <div class="muted" id="verdictMeta">Select a live realm on onyx-1 or click any row from Tab 1.</div>
+              <div class="muted mono" style="font-size:0.74rem;margin-top:4px" id="digestLine"></div>
+            </div>
+          </div>
+          <div id="findingsList"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: INTERACTIVE THREAT-CLASS EXPLOIT & AUTO-FIX SANDBOX -->
+    <section id="tab-playground" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <h2>Interactive Gno Threat-Class Exploit &amp; Safe-Patch Lab</h2>
+          <p class="muted">Pick any official Gno.land Threat-Class scenario, inspect the highlighted vulnerable AST lines, or edit freely — then click <strong>Apply Safe Gno Patch</strong> to watch Go WASM re-grade the contract to <strong>A+ (100/100)</strong> in milliseconds.</p>
+          <div class="chips" id="scenarioChips"></div>
+          <div class="row">
+            <button id="scanSourceBtn">Analyze Code in WASM</button>
+            <button id="applyFixBtn" class="warn-btn">Apply Safe Gno Patch → Re-Scan</button>
+            <button id="restoreVulnBtn" class="secondary">Restore Vulnerable Code</button>
+          </div>
+          <textarea id="sourceArea" spellcheck="false"></textarea>
+        </div>
+
+        <div class="card">
+          <h2>Live AST Line Highlighting &amp; Sandbox Verdict</h2>
+          <div class="score-banner">
+            <div class="grade-box" id="sbGradeBox">—</div>
+            <div>
+              <div style="font-weight:700;font-size:1.02rem" id="sbVerdictTitle">Select a scenario</div>
+              <div class="muted" id="sbVerdictMeta">Instant in-browser Go AST analysis via ironclad.wasm</div>
+            </div>
+          </div>
+          <div class="code-view" id="sbCodeHighlight"></div>
+          <h3 style="margin-top:12px">Detected Vulnerabilities &amp; Remediations</h3>
+          <div id="sbFindingsList"></div>
+        </div>
       </div>
     </section>
   </div>

@@ -89,11 +89,36 @@ Inline suppressions: append `//ironclad:ignore <RULE-ID>` on the line to documen
 
 ---
 
+## MCP Server (`ironclad mcp`) & Drop-in GitHub Action (`action.yml`)
+
+**1. MCP JSON-RPC 2.0 Stdio Server for AI Coding Agents & `gnomcp` workflows:**
+```bash
+# Exposes 4 tools: ironclad_scan_source, ironclad_scan_remote, ironclad_verify_attestation, ironclad_list_rules
+./bin/ironclad mcp --remote https://rpc.onyx.testnets.gno.land:443 \
+  --realm gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
+```
+
+**2. Drop-in GitHub Code Scanning Action (`action.yml`):**
+```yaml
+- uses: mevlanayalcin/ironclad@v1.0.0
+  with:
+    target: ./gno/r/myuser/myrealm
+    fail-on-high: "true"
+    sarif-file: ironclad.sarif
+```
+
+**3. Live Browser Suite (`https://mevlanayalcin.github.io/ironclad/`):**
+- **Trustless WASM Re-Verification:** Re-fetches live `.gno` files via ABCI `vm/qfile`, runs deterministic `ironclad.wasm` in-browser, and verifies all 12 on-chain `onyx-1` attestations bit-for-bit against immutable chain SHA-256 digests.
+- **Adena Wallet Integration (`window.adena.DoContract`):** 1-click `RegisterAuditor`, `PublishAttestation`, and `ChallengeAttestation` directly on `onyx-1` (with copyable `gnokey` CLI fallback).
+- **Interactive Threat-Class Exploit & Safe-Patch Lab:** 6 curated Gno.land threat scenarios (`Class-1a/1b` through `PR #5068`) with line-level AST highlighting and 1-click idiomatic safe patches flipping Grade `F` → `A+ (100/100)`.
+
+---
+
 ## Quick Start
 
 ```bash
 make gno-test && make gno-lint   # Gno v1.8.0-rc.1 unit tests & lint (override GNOROOT / GNO_BIN as needed)
-make build && make go-test       # Go CLI, SSRF-hardened server, WASM engine & race tests
+make build && make go-test       # Go CLI, MCP stdio server, SSRF-hardened server & race tests (5/5 PASS)
 make e2e                         # Full live gnodev v1.8.0-rc.1 E2E test + SARIF 2.1.0 check
 ```
 
@@ -101,9 +126,9 @@ make e2e                         # Full live gnodev v1.8.0-rc.1 E2E test + SARIF
 
 ## Live `onyx-1` Deployment & HD Demo Video
 
-- **HD Demo Video (1080p MP4):** [Watch / Download `ironclad-demo-1080p.mp4`](https://github.com/mevlanayalcin/ironclad/releases/download/v1.0.0/ironclad-demo-1080p.mp4)
+- **HD Demo Video (1080p MP4):** [Watch / Download `ironclad-demo-1080p.mp4`](https://mevlanayalcin.github.io/ironclad/ironclad-demo-1080p.mp4)
 - **Live `onyx-1` Realm (`gnoweb`):** https://onyx.testnets.gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
 - **Live WebAssembly Browser Scanner:** https://mevlanayalcin.github.io/ironclad/
 - **GPAS Verification (`passed`):** https://gpas.onyx.testnets.gno.land/?path=gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
 - **Reproducible WASM SHA-256 (`make build-wasm`, Go `1.24.6`, `-buildvcs=false -trimpath`):** `f87d697838b4079f738ee91c75b456ae199ac301d8bf7af53d33bc14d09b85b4`
-- **Live On-Chain Proofs:** Deploy TX `3XyOwZ87YyyiK7yu96GMcx1EPkkQI8NFwrCaZjp0DDY=` (`1420062`), `RegisterAuditor` TX `TjuV6XIsBo3+Q0UHT8yv7zqYwPmoXCOJbg1GG+CYUDQ=` (`1421138`), 6 live `PublishAttestation` records (`r/.../ironclad` A+, `r/.../tollgate/v2` A+, `r/sys/namereg/v0` A, `r/gnoland/wugnot` A, `r/gnoland/blog` D, `r/sys/users` D), and a live resolved `ChallengeAttestation` + `RespondToChallenge` cycle (`1421555` / `1421557`).
+- **Live On-Chain Proofs (12 Verified Attestations + 1 Resolved Challenge):** Deploy TX `3XyOwZ87YyyiK7yu96GMcx1EPkkQI8NFwrCaZjp0DDY=` (`1420062`), `RegisterAuditor` TX `TjuV6XIsBo3+Q0UHT8yv7zqYwPmoXCOJbg1GG+CYUDQ=` (`1421138`), 12 live `PublishAttestation` records (`#1 r/.../ironclad` A+, `#2 r/sys/namereg/v0` A, `#3 r/gnoland/wugnot` A, `#4 r/gnoland/blog` D, `#5 r/sys/users` D, `#6 r/.../tollgate/v2` A+, `#7 r/gov/dao` F `1430407`, `#8 r/sys/params` A `1430416`, `#9 r/sys/validators/v2` B `1430418`, `#10 r/gnoland/boards2/v0` F `1430429`, `#11 r/gnoland/coins` A+ `1430431`, `#12 r/sys/rewards` A+ `1430433`), and a live resolved `ChallengeAttestation` + `RespondToChallenge` cycle (`1421555` / `1421557`).

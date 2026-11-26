@@ -16,7 +16,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: ironclad <scan|rules> [flags] <dir-or-pkgpath>")
+		fmt.Fprintln(os.Stderr, "Usage: ironclad <scan|rules|mcp> [flags] <dir-or-pkgpath>")
 		os.Exit(1)
 	}
 	switch os.Args[1] {
@@ -26,6 +26,8 @@ func main() {
 		}
 	case "scan":
 		runScan(os.Args[2:])
+	case "mcp":
+		runMCP(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown subcommand:", os.Args[1])
 		os.Exit(1)
