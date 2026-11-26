@@ -28,7 +28,6 @@ const (
 	ChallengeAccepted = "accepted"
 	ChallengeRebutted = "rebutted"
 
-	realmBasePath  = "/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad"
 	maxRenderRows  = 25
 	maxPage        = 10000  // prevents (page-1)*maxRenderRows overflow
 	maxFindingCnt  = 100000 // prevents int64 score-penalty wraparound (R5)
@@ -458,9 +457,9 @@ func ChallengeAttestation(
 	}
 
 	challenger := cur.Previous().Address()
-	chDedupKey := strconv.FormatUint(attestationID, 10) + "|" + missedRuleID + "|" + evidenceDigest + "|" + challenger.String()
+	chDedupKey := strconv.FormatUint(attestationID, 10) + "|" + missedRuleID + "|" + challenger.String()
 	if challengeDedup.Has(chDedupKey) {
-		panic("ironclad: duplicate challenge for same attestation, rule, evidence, and challenger")
+		panic("ironclad: duplicate challenge for same attestation, rule, and challenger")
 	}
 
 	cid := nextChallengeID.Next()
@@ -669,7 +668,26 @@ func VerifyAttestationByDigest(digest string) (uint64, bool) {
 	if v == nil {
 		return 0, false
 	}
-	return v.(uint64), true
+	id := v.(uint64)
+	if rec := getAttestationRecord(id); rec != nil && rec.status == StatusValid {
+		return id, true
+	}
+	prefix := digest + "|"
+	end := digest + "}"
+	foundActive := uint64(0)
+	seen := 0
+	auditorDigestIndex.Iterate(prefix, end, func(_ string, val any) bool {
+		seen++
+		if r := getAttestationRecord(val.(uint64)); r != nil && r.status == StatusValid {
+			foundActive = r.id
+			return true
+		}
+		return seen >= maxRenderRows
+	})
+	if foundActive != 0 {
+		return foundActive, true
+	}
+	return id, true
 }
 
 func VerifyAttestationByDigestAndAuditor(digest string, auditor address) (uint64, bool) {
@@ -822,7 +840,7 @@ func renderHome(page int) string {
 		if page > 1 {
 			b.WriteString(ufmt.Sprintf("[Prev Page](/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad:page/%d) ", page-1))
 		}
-		if offset+maxRenderRows < attestations.Size() {
+		if page < maxPage && offset+maxRenderRows < attestations.Size() {
 			b.WriteString(ufmt.Sprintf("[Next Page](/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad:page/%d)", page+1))
 		}
 		b.WriteString("\n\n")

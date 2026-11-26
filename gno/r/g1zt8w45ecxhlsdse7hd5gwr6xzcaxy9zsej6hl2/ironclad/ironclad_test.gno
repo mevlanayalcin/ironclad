@@ -144,7 +144,7 @@ func TestGnowebLinksAndR2Hardening(cur realm, t *testing.T) {
 	testing.SetRealm(testing.NewUserRealm(res1))
 	ch1 := ChallengeAttestation(cross(cur), id1, "AVL001", evHash, "first report")
 	uassert.Equal(t, uint64(1), ch1)
-	uassert.AbortsWithMessage(t, cur, "ironclad: duplicate challenge for same attestation, rule, evidence, and challenger", func() {
+	uassert.AbortsWithMessage(t, cur, "ironclad: duplicate challenge for same attestation, rule, and challenger", func() {
 		ChallengeAttestation(cross(cur), id1, "AVL001", evHash, "spam duplicate")
 	})
 

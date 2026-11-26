@@ -18,7 +18,7 @@ build:
 	go build -o bin/ironclad-server ./cmd/ironclad-server
 
 build-wasm:
-	GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o web/ironclad.wasm ./cmd/ironclad-wasm
+	GOOS=js GOARCH=wasm go build -buildvcs=false -trimpath -ldflags="-s -w" -o web/ironclad.wasm ./cmd/ironclad-wasm
 	cp -f web/ironclad.wasm docs/ironclad.wasm
 
 go-test:
