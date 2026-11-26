@@ -17,7 +17,7 @@
 - **Attestation `#3` (`r/gnoland/wugnot` — A 94/100):** Height `1421145` · TX `8qmBi4kpsb14ufFnHTvKadEDSURSH9GWCwzfELjTr+U=`
 - **Attestation `#4` (`r/gnoland/blog` — D 70/100):** Height `1421148` · TX `hgeu6JNeh6cIckc2LmcqwUth7Ni2C8bIHzQfCi0o/p4=`
 - **Attestation `#5` (`r/sys/users` — D 55/100):** Height `1421151` · TX `2+rVt6yDZiyCXrQhWWspihDbE441UlO5kjxwzHMJ/NM=`
-- **Deterministic WASM SHA-256 (`make build-wasm` with `-buildvcs=false -trimpath`):** `f87d697838b4079f738ee91c75b456ae199ac301d8bf7af53d33bc14d09b85b4`
+- **Deterministic WASM SHA-256 (`make build-wasm` on Go `1.24.6` with `-buildvcs=false -trimpath`):** `f87d697838b4079f738ee91c75b456ae199ac301d8bf7af53d33bc14d09b85b4`
 
 ## Problem & Innovation
 In November 2026, Gno.land published its formal smart-contract security threat taxonomy (`docs/resources/gno-security.md`, `docs/resources/gno-ai-contract-review.md`) covering realm capability leaks (`Class-1a/1b`), designation forgery (`Class-2`), interface substitution & sealing bypasses (`Class-3`), closed-over callbacks (`Class-4`), `IsUser()` vs `IsUserCall()`, borrow-rule #2 pointer leaks, persisted bankers, `GetCoins()` gas DoS, unsanitized `Render(path)`, and lint rules `AVL001` / `GLOBAL001` / `RENDER001` (`#5068`).
@@ -26,4 +26,4 @@ In November 2026, Gno.land published its formal smart-contract security threat t
 1. **15 AST Security & Lint Rules + `PARSE-ERR`:** Line-preserving Gno preprocessor + `go/parser`/`go/ast` analyzer outputting Terminal, JSON, Markdown, and GitHub Code Scanning **SARIF v2.1.0**.
 2. **Live Chain Scanning (`vm/qfile`):** Inspects any live deployed `onyx-1` package directly over RPC with zero local checkout required (`ironclad scan --remote https://rpc.onyx.testnets.gno.land:443 <pkgPath>`).
 3. **Immutable Multi-Auditor Attestation & Challenge Registry (`r/.../ironclad`):** Pure `/p/` scoring & SHA-256 `AttestationDigest` verifier + stateful `/r/` realm indexed per `(pkgPath, auditor)` (preventing certificate hijacking and digest squatting) with structured `ChallengeAttestation` & `RespondToChallenge` auditor resolution.
-4. **Deterministic WebAssembly Browser Scanner:** Live GitHub Pages UI (`https://mevlanayalcin.github.io/ironclad/`) runs the exact same Go AST engine compiled to reproducible `ironclad.wasm` directly in-browser via ABCI RPC + WebCrypto.
+4. **Deterministic WebAssembly Browser Scanner:** Live GitHub Pages UI (`https://mevlanayalcin.github.io/ironclad/`) runs the exact same Go AST engine compiled to reproducible `ironclad.wasm` directly in-browser via ABCI RPC and pure-Go WASM SHA-256.

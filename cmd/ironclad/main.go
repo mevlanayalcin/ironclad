@@ -67,6 +67,10 @@ func runScan(args []string) {
 			fmt.Fprintf(os.Stderr, "scan failed: %v\n", err)
 			os.Exit(1)
 		}
+		if rep.FilesScanned == 0 {
+			fmt.Fprintf(os.Stderr, "scan failed: no .gno source files found in %s\n", target)
+			os.Exit(1)
+		}
 	}
 
 	switch *format {

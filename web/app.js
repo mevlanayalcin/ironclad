@@ -212,8 +212,15 @@ async function scanRemote(pkgOverride) {
     } catch {}
     renderResult(data);
   } catch (err) {
+    $("gradeRing").textContent = "!";
+    $("gradeRing").className = "grade-ring g-F";
     $("verdictTitle").textContent = "Remote scan error";
     $("verdictMeta").textContent = err.message;
+    $("findingsList").innerHTML = `<div class="finding info">No scan report produced — verify package path is active on the selected RPC.</div>`;
+    if ($("sourceHashOut")) $("sourceHashOut").textContent = "—";
+    if ($("reportDigestOut")) $("reportDigestOut").textContent = "—";
+    if ($("attestDigestOut")) $("attestDigestOut").textContent = "—";
+    if ($("attestStatus")) $("attestStatus").textContent = "—";
   }
 }
 
@@ -222,16 +229,18 @@ $("loadSafeBtn").addEventListener("click", () => { $("sourceArea").value = SAFE_
 $("scanSourceBtn").addEventListener("click", scanSource);
 $("scanRemoteBtn").addEventListener("click", () => scanRemote());
 $("scanNameregBtn").addEventListener("click", () => scanRemote("gno.land/r/sys/namereg/v0"));
+$("scanBlogBtn").addEventListener("click", () => scanRemote("gno.land/r/gnoland/blog"));
 $("scanTollgateBtn").addEventListener("click", () => {
   const cur = $("pkgInput").value;
   const addrMatch = cur.match(/g1[a-z0-9]{38}/);
   const addr = addrMatch ? addrMatch[0] : "g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2";
-  scanRemote(`gno.land/r/${addr}/tollgate`);
+  scanRemote(`gno.land/r/${addr}/tollgate/v2`);
 });
 
 $("sourceArea").value = VULN_SAMPLE;
 (async () => {
-  try {
+  const isStaticHost = location.hostname.endsWith("github.io") || location.protocol === "file:";
+  if (!isStaticHost) try {
     const r = await fetch("/api/health");
     if (r.ok) {
       const h = await r.json();
