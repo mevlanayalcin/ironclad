@@ -2,7 +2,7 @@ GNOROOT ?= /home/ubuntu/gnome-tavern/gno
 GNO_BIN ?= /home/ubuntu/gnome-tavern/bin/gno
 ADDR    ?= g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2
 
-.PHONY: all gno-test gno-lint build go-test e2e deploy-onyx
+.PHONY: all gno-test gno-lint build build-wasm go-test e2e deploy-onyx
 
 all: gno-test gno-lint build go-test
 
@@ -16,6 +16,10 @@ build:
 	mkdir -p bin
 	go build -o bin/ironclad ./cmd/ironclad
 	go build -o bin/ironclad-server ./cmd/ironclad-server
+
+build-wasm:
+	GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o web/ironclad.wasm ./cmd/ironclad-wasm
+	cp -f web/ironclad.wasm docs/ironclad.wasm
 
 go-test:
 	go test -race -v ./...

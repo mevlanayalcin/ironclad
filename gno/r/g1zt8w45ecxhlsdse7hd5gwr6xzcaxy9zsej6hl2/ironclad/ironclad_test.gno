@@ -21,6 +21,7 @@ func resetState() {
 	digestFirstIndex = avl.NewTree()
 	challenges = avl.NewTree()
 	attChallenges = avl.NewTree()
+	challengeDedup = avl.NewTree()
 	nextAttestID = 0
 	nextChallengeID = 0
 }
@@ -124,4 +125,52 @@ func TestRegressionAllFable52Findings(cur realm, t *testing.T) {
 	jsonOut := Render("json/attestation/1")
 	uassert.False(t, strings.Contains(jsonOut, "[click]"))
 	uassert.True(t, strings.Contains(jsonOut, `\u005bclick\u005d`))
+}
+
+func TestGnowebLinksAndR2Hardening(cur realm, t *testing.T) {
+	defer resetState()
+
+	aud1 := testutils.TestAddress("aud_r2_1")
+	res1 := testutils.TestAddress("res_r2_1")
+	srcHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	repHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	evHash := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	testing.SetRealm(testing.NewUserRealm(aud1))
+	id1 := PublishAttestation(cross(cur), "gno.land/r/demo/check", srcHash, repHash, "ironclad-1.0.0", 0, 0, 0, 0, 0, "", "clean pass", "")
+	uassert.Equal(t, uint64(1), id1)
+
+	// Duplicate challenge by same challenger for same (att, rule, evidence) must abort
+	testing.SetRealm(testing.NewUserRealm(res1))
+	ch1 := ChallengeAttestation(cross(cur), id1, "AVL001", evHash, "first report")
+	uassert.Equal(t, uint64(1), ch1)
+	uassert.AbortsWithMessage(t, cur, "ironclad: duplicate challenge for same attestation, rule, evidence, and challenger", func() {
+		ChallengeAttestation(cross(cur), id1, "AVL001", evHash, "spam duplicate")
+	})
+
+	// Revoke id1 then re-publish same digest -> VerifyAttestationByDigest returns active id2
+	testing.SetRealm(testing.NewUserRealm(aud1))
+	RevokeAttestation(cross(cur), id1, "superseding")
+	id2 := PublishAttestation(cross(cur), "gno.land/r/demo/check", srcHash, repHash, "ironclad-1.0.0", 0, 0, 0, 0, 0, "", "re-published", "")
+	uassert.Equal(t, uint64(2), id2)
+	att2, _ := GetAttestation(id2)
+	gotID, ok := VerifyAttestationByDigest(att2.Digest)
+	urequire.True(t, ok)
+	uassert.Equal(t, id2, gotID)
+
+	// Zero broken leading-colon gnoweb links across all rendered routes & huge page clamp works
+	views := []string{
+		Render(""),
+		Render("page/999999999999999999"),
+		Render("taxonomy"),
+		Render("auditors"),
+		Render("pkg/gno.land/r/demo/check"),
+		Render("attestation/2"),
+		Render("nonexistent/path"),
+	}
+	for _, v := range views {
+		uassert.False(t, strings.Contains(v, "](:"))
+	}
+	uassert.True(t, strings.Contains(views[0], "/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad:taxonomy"))
+	uassert.True(t, strings.Contains(views[0], "$help&func=PublishAttestation"))
 }

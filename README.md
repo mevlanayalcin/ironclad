@@ -25,6 +25,18 @@ Ironclad ironclad-1.0.0 | Target: gno.land/r/gnoland/wugnot
 Grade: A (94/100) | Files: 1 | C:0 H:0 M:1 L:0 I:0
   [MEDIUM] GLOBAL001 (Lint-Encapsulation) wugnot.gno:16 — exported mutable global var Token exposes realm state directly
 
+$ ironclad scan-chain --rpc https://rpc.onyx.testnets.gno.land:443 gno.land/r/gnoland/blog
+Grade: D (70/100) | C:0 H:0 M:5 L:0 I:0
+  [MEDIUM] GNO-SEC06, GLOBAL001, AVL001 (unbounded iteration & exported mutable realm state)
+
+$ ironclad scan-chain --rpc https://rpc.onyx.testnets.gno.land:443 gno.land/r/sys/users
+Grade: D (55/100) | C:0 H:1 M:5 L:0 I:0
+  [HIGH] GNO-SEC03 (exported function returning mutable pointer) + [MEDIUM] GLOBAL001 / GNO-SEC06
+
+$ ironclad scan-chain --rpc https://rpc.onyx.testnets.gno.land:443 gno.land/r/gov/dao
+Grade: F (0/100) | C:0 H:6 M:9 L:0 I:0
+  [HIGH] GNO-TC4 / GNO-SEC03 + [MEDIUM] GLOBAL001 / GNO-SEC06
+
 $ ironclad scan --pkg gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad ./gno/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
 Ironclad ironclad-1.0.0 | Target: gno.land/r/g1zt8w45ecxhlsdse7hd5gwr6xzcaxy9zsej6hl2/ironclad
 Grade: A+ (100/100) | Files: 1 | C:0 H:0 M:0 L:0 I:0
